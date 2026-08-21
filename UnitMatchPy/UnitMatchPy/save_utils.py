@@ -640,14 +640,10 @@ def save_prob_for_phy(probability, param, clus_info):
         np.save(save_file_tmp, matrix_prob)
 
 
-def make_UnitMatch_folder_from_spikeinterface(inputs, save_dir):
+def make_UnitMatch_folder_from_sorting_analyzers(analyzers, save_dir):
     """
-    Create a UnitMatch input folder from SpikeInterface SortingAnalyzer or
-    BaseSorting objects.
-
-    BaseSorting inputs must have a registered recording. They are converted to
-    sparse in-memory SortingAnalyzers using UnitMatch's channel radius. Missing
-    analyzer extensions are computed automatically.
+    Creates a folder called `save_dir` for a single session,
+    which can be used to run UnitMatch.
     
     The output folder has the structure
 
@@ -673,40 +669,21 @@ def make_UnitMatch_folder_from_spikeinterface(inputs, save_dir):
 
     # only import spikeinterface here, so that non-si users don't need to have it in their env
     import spikeinterface.full as si
-    from UnitMatchPy.default_params import get_default_param
 
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True)
 
     required_extensions = ['random_spikes', 'waveforms', 'templates', 'template_metrics', 'quality_metrics']
-    channel_radius = get_default_param()["channel_radius"]
 
-    for session_index, analyzer in enumerate(inputs):
-        if isinstance(analyzer, si.BaseSorting):
-            if not analyzer.has_recording():
-                raise ValueError(
-                    "BaseSorting inputs must have a recording registered with "
-                    "sorting.register_recording(recording)."
-                )
-            analyzer = si.create_sorting_analyzer(
-                sorting=analyzer,
-                recording=analyzer._recording,
-                sparse=True,
-                method="radius",
-                radius_um=channel_radius,
-            )
-        elif not isinstance(analyzer, si.SortingAnalyzer):
-            raise TypeError(
-                "Each input must be a SpikeInterface SortingAnalyzer or BaseSorting."
-            )
+    for session_index, analyzer in enumerate(analyzers):
 
-        missing_extensions = [
-            extension
-            for extension in required_extensions
-            if not analyzer.has_extension(extension)
-        ]
-        if missing_extensions:
-            analyzer.compute(missing_extensions)
+        missing_extensions = []
+        for extension in required_extensions:
+            if not analyzer.has_extension(extension):
+                missing_extensions.append(extension)
+        if len(missing_extensions) > 0:
+            raise ValueError(f"Analyzer must have {missing_extensions} extensions computed.\n" \
+                "Please compute them by running `sorting_analyzer.compute({missing_extensions})")
 
         session_dir = save_dir / f'Session{session_index}'
         session_dir.mkdir()
@@ -730,10 +707,7 @@ def make_UnitMatch_folder_from_spikeinterface(inputs, save_dir):
             first_half_average_waveform_sparse = np.average(first_half_waveforms, axis=0)
             second_half_average_waveform_sparse = np.average(second_half_waveforms, axis=0)
 
-            if analyzer.sparsity is None:
-                channel_indices = np.arange(analyzer.get_num_channels())
-            else:
-                channel_indices = analyzer.sparsity.unit_id_to_channel_indices[unit_id]
+            channel_indices = analyzer.sparsity.unit_id_to_channel_indices[unit_id]
 
             both_halves_average_waveform_dense[:, channel_indices, 0] = first_half_average_waveform_sparse[:, :channel_indices.size]
             both_halves_average_waveform_dense[:, channel_indices, 1] = second_half_average_waveform_sparse[:, :channel_indices.size]
@@ -776,8 +750,3 @@ def make_UnitMatch_folder_from_spikeinterface(inputs, save_dir):
 
         with open(session_dir / "waveform_params.json", "w") as f:
             json.dump(params_waveform, f, indent=2)
-
-
-def make_UnitMatch_folder_from_sorting_analyzers(analyzers, save_dir):
-    """Backward-compatible alias for make_UnitMatch_folder_from_spikeinterface."""
-    return make_UnitMatch_folder_from_spikeinterface(analyzers, save_dir)
