@@ -446,69 +446,43 @@ def evaluate_output(
 
 
 def curate_matches(matches_GUI, is_match, not_match, mode="and"):
-    """
-    There are two options, 'and' 'or'.
-    'And' gives a match if both CV give it as a match
-    'Or gives a match if either CV gives it as a match
+    """Combine automatic CV matches and apply manual curation.
 
     Parameters
     ----------
     matches_GUI : ndarray or None
-        The array of matches calculated for the GUI or None if not available
+        The two arrays of matches calculated for the GUI, or None if unavailable.
     is_match : list
-        A list of pairs manually curated as a match in the GUI
+        Pairs manually curated as matches in the GUI.
     not_match : list
-        A list of pairs manually curated as NOT a match in the GUI
+        Pairs manually curated as non-matches in the GUI.
     mode : str, optional
-        either 'and' or 'or' depending on preferred rules of CV concatenation, by default 'and'
+        ``"and"`` keeps pairs found in both CV directions; ``"or"`` keeps pairs
+        found in either direction. By default ``"and"``.
 
     Returns
     -------
     ndarray
-        The curated list of matches
+        The curated match pairs with shape ``(n_matches, 2)``.
     """
-    if matches_GUI is not None:
-        matches_a = matches_GUI[0]
-        matches_b = matches_GUI[1]
+    if matches_GUI is None:
+        matches_a = set()
+        matches_b = set()
     else:
-        matches_a = np.zeros((0, 2))
-        matches_b = np.zeros((0, 2))
-
-    # if both arrays are empty leave function
-    if np.logical_and(len(is_match) == 0, len(not_match) == 0):
-        print("There are no curated matches/none matches")
-        return None
-
-    # if one array is empty make it have corrected shape
-    if len(is_match) == 0:
-        is_match = np.zeros((0, 2))
-    else:
-        is_match = np.array(is_match)
-
-    if len(not_match) == 0:
-        not_match = np.zeros((0, 2))
-    else:
-        not_match = np.array(not_match)
+        matches_a = set(map(tuple, matches_GUI[0]))
+        matches_b = set(map(tuple, matches_GUI[1]))
 
     if mode == "and":
-        matches_tmp = np.concatenate((matches_a, matches_b), axis=0)
-        matches_tmp, counts = np.unique(matches_tmp, return_counts=True, axis=0)
-        matches = matches_tmp[counts == 2]
+        matches = matches_a & matches_b
     elif mode == "or":
-        matches = np.unique(np.concatenate((matches_a, matches_b), axis=0), axis=0)
+        matches = matches_a | matches_b
     else:
-        print("please make mode = 'and' or 'or' ")
-        return None
+        raise ValueError("mode must be 'and' or 'or'")
 
-    # add matches in IS Matches
-    matches = np.unique(np.concatenate((matches, is_match), axis=0), axis=0)
-    print(matches.shape)
-    # remove Matches in NotMatch
-    matches_tmp = np.concatenate((matches, not_match), axis=0)
-    matches_tmp, counts = np.unique(matches_tmp, return_counts=True, axis=0)
-    matches = matches_tmp[counts == 1]
+    matches |= set(map(tuple, is_match))
+    matches -= set(map(tuple, not_match))
 
-    return matches
+    return np.asarray(sorted(matches), dtype=int).reshape(-1, 2)
 
 
 def isin_2d(test_arr, parent_arr):
