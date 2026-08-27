@@ -1,6 +1,7 @@
 import json
 import shutil
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -14,15 +15,30 @@ from .save_utils import make_UnitMatch_folder_from_sorting_analyzers
 
 
 class SpikeInterfaceSessionMerger:
-    """Review and soft-merge likely over-split units in one session."""
+    """Review and soft-merge likely over-split units in one logical session.
+
+    Multiple analyzers can be supplied when a curation pipeline stores unchanged
+    and replacement units separately. In that case ``unit_ids`` must contain the
+    final unit IDs from the consolidated metrics table.
+    """
 
     def __init__(
         self,
         analyzer,
+        unit_ids=None,
         match_threshold=0.5,
         censored_period_ms=0.5,
     ):
-        self.analyzer = analyzer
+        if isinstance(analyzer, Sequence):
+            self.analyzers = list(analyzer)
+        else:
+            self.analyzers = [analyzer]
+        if not self.analyzers:
+            raise ValueError("At least one analyzer is required.")
+
+        self.unit_ids = self._normalize_unit_ids(unit_ids)
+        self._unit_sources = self._resolve_unit_sources()
+        self.analyzer = self.analyzers[0]
         self.match_threshold = match_threshold
         self.censored_period_ms = censored_period_ms
         self.output_prob_matrix = None
@@ -31,28 +47,105 @@ class SpikeInterfaceSessionMerger:
         self.merged_analyzer = None
         self._validate_analyzer()
 
-    def _validate_analyzer(self):
-        missing = [
-            name
-            for name in ("random_spikes", "waveforms")
-            if not self.analyzer.has_extension(name)
-        ]
+    def _normalize_unit_ids(self, unit_ids):
+        if unit_ids is None:
+            if len(self.analyzers) > 1:
+                raise ValueError(
+                    "unit_ids is required for multiple analyzers. Pass the final "
+                    "unit IDs from metrics.index."
+                )
+            return np.asarray(self.analyzers[0].unit_ids)
+
+        normalized = np.asarray(list(unit_ids))
+        if normalized.ndim != 1 or normalized.size == 0:
+            raise ValueError("unit_ids must be a non-empty one-dimensional sequence.")
+        if np.unique(normalized).size != normalized.size:
+            raise ValueError("unit_ids contains duplicates.")
+        return normalized
+
+    def _resolve_unit_sources(self):
+        sources = {}
+        missing = []
+        for unit_id in self.unit_ids:
+            matches = [
+                analyzer
+                for analyzer in self.analyzers
+                if unit_id in set(analyzer.unit_ids.tolist())
+            ]
+            if not matches:
+                missing.append(unit_id)
+            elif len(matches) > 1:
+                raise ValueError(
+                    f"Unit {unit_id!r} occurs in more than one analyzer. "
+                    "Pass complementary analyzers with unambiguous final units."
+                )
+            else:
+                sources[unit_id] = matches[0]
         if missing:
-            raise ValueError(
-                f"Analyzer is missing required extensions: {missing}. "
-                "Compute them before creating the merger."
+            raise ValueError(f"Final unit IDs are missing from the analyzers: {missing}")
+        return sources
+
+    def _validate_analyzer(self):
+        reference = self.analyzers[0]
+        for analyzer in self.analyzers:
+            missing = [
+                name
+                for name in ("random_spikes", "waveforms")
+                if not analyzer.has_extension(name)
+            ]
+            if missing:
+                raise ValueError(
+                    f"Analyzer is missing required extensions: {missing}. "
+                    "Compute them before creating the merger."
+                )
+            if analyzer.get_num_segments() != 1:
+                raise ValueError("Only single-segment analyzers are supported.")
+            if analyzer.sampling_frequency != reference.sampling_frequency:
+                raise ValueError("All analyzers must have the same sampling frequency.")
+            if analyzer.get_num_samples() != reference.get_num_samples():
+                raise ValueError("All analyzers must cover the same recording duration.")
+            if not np.array_equal(
+                analyzer.get_channel_locations(),
+                reference.get_channel_locations(),
+            ):
+                raise ValueError("All analyzers must use the same channel geometry.")
+
+    def _export_composite_session(self, export_dir):
+        source_dir = export_dir / "sources"
+        make_UnitMatch_folder_from_sorting_analyzers(
+            self.analyzers, source_dir
+        )
+        session_dir = export_dir / "Session0"
+        session_dir.mkdir()
+
+        source_indices = {
+            id(analyzer): index for index, analyzer in enumerate(self.analyzers)
+        }
+        for unit_id in self.unit_ids:
+            source_index = source_indices[id(self._unit_sources[unit_id])]
+            shutil.copy2(
+                source_dir
+                / f"Session{source_index}"
+                / f"Unit{unit_id}_RawSpikes.npy",
+                session_dir / f"Unit{unit_id}_RawSpikes.npy",
             )
-        if self.analyzer.get_num_segments() != 1:
-            raise ValueError("Only single-segment analyzers are supported.")
+
+        first_source = source_dir / "Session0"
+        shutil.copy2(
+            first_source / "channel_locations.npy",
+            session_dir / "channel_locations.npy",
+        )
+        shutil.copy2(
+            first_source / "waveform_params.json",
+            session_dir / "waveform_params.json",
+        )
+        return session_dir
 
     def compute_proposals(self):
         """Run session-local UnitMatch and return ISI-safe merge pairs."""
         with tempfile.TemporaryDirectory(prefix="unitmatch-session-") as temp_dir:
             export_dir = Path(temp_dir)
-            make_UnitMatch_folder_from_sorting_analyzers(
-                [self.analyzer], export_dir
-            )
-            wave_path = export_dir / "Session0"
+            wave_path = self._export_composite_session(export_dir)
             channel_pos = [np.load(wave_path / "channel_locations.npy")]
             with (wave_path / "waveform_params.json").open(
                 encoding="utf-8"
@@ -65,7 +158,7 @@ class SpikeInterfaceSessionMerger:
             param["match_threshold"] = self.match_threshold
             param = util.get_probe_geometry(channel_pos[0], param)
 
-            unit_ids_per_session = [self.analyzer.unit_ids]
+            unit_ids_per_session = [self.unit_ids]
             (
                 waveform,
                 session_id,
@@ -81,9 +174,11 @@ class SpikeInterfaceSessionMerger:
             "session_id": session_id,
             "original_ids": np.concatenate(unit_ids),
             "spike_times": [
-                self.analyzer.sorting.get_unit_spike_train(unit_id=unit_id)
-                / self.analyzer.sampling_frequency
-                for unit_id in self.analyzer.unit_ids
+                self._unit_sources[unit_id].sorting.get_unit_spike_train(
+                    unit_id=unit_id
+                )
+                / self._unit_sources[unit_id].sampling_frequency
+                for unit_id in self.unit_ids
             ],
         }
         properties = ov.extract_parameters(waveform, channel_pos, clus_info, param)
@@ -157,7 +252,7 @@ class SpikeInterfaceSessionMerger:
 
         unit_index = {
             unit_id: index
-            for index, unit_id in enumerate(self.analyzer.unit_ids.tolist())
+            for index, unit_id in enumerate(self.unit_ids.tolist())
         }
         rows = []
         for group in self.merge_groups:
@@ -204,14 +299,57 @@ class SpikeInterfaceSessionMerger:
                 "Approve or reject every proposed merge before applying: "
                 f"{self.undecided_groups}"
             )
+        if len(self.analyzers) == 1:
+            if np.array_equal(self.unit_ids, self.analyzer.unit_ids):
+                combined_analyzer = self.analyzer
+            else:
+                combined_analyzer = self.analyzer.select_units(self.unit_ids)
+        else:
+            try:
+                from spikeinterface import (
+                    SortingAnalyzer,
+                    aggregate_units,
+                    create_sorting_analyzer,
+                )
+            except ImportError as error:
+                raise ImportError(
+                    "SpikeInterface is required to combine multiple analyzers."
+                ) from error
+
+            selected_sortings = [
+                self._unit_sources[unit_id].sorting.select_units([unit_id])
+                for unit_id in self.unit_ids
+            ]
+            combined_sorting = aggregate_units(
+                selected_sortings, renamed_unit_ids=self.unit_ids
+            )
+            recording = getattr(self.analyzer, "recording", None)
+            if recording is not None:
+                combined_analyzer = create_sorting_analyzer(
+                    sorting=combined_sorting,
+                    recording=recording,
+                    format="memory",
+                    sparse=False,
+                )
+            else:
+                combined_analyzer = SortingAnalyzer.create_memory(
+                    sorting=combined_sorting,
+                    recording=None,
+                    sparsity=None,
+                    return_in_uV=self.analyzer.return_in_uV,
+                    peak_sign=self.analyzer.peak_sign,
+                    peak_mode=self.analyzer.peak_mode,
+                    rec_attributes=self.analyzer.rec_attributes,
+                )
+
         if self.approved_groups:
-            self.merged_analyzer = self.analyzer.merge_units(
+            self.merged_analyzer = combined_analyzer.merge_units(
                 merge_unit_groups=self.approved_groups,
                 censored_period_ms=self.censored_period_ms,
                 merging_mode="soft",
             )
         else:
-            self.merged_analyzer = self.analyzer
+            self.merged_analyzer = combined_analyzer
         return self.merged_analyzer
 
     def save(self, folder, format="binary_folder", overwrite=False):
