@@ -1,9 +1,11 @@
 import os
 import json
 import pickle
+import shutil
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from tqdm.auto import tqdm
 
 def save_auc_summary(save_dir, auc_summary):
     """
@@ -640,7 +642,9 @@ def save_prob_for_phy(probability, param, clus_info):
         np.save(save_file_tmp, matrix_prob)
 
 
-def make_UnitMatch_folder_from_sorting_analyzers(analyzers, save_dir):
+def make_UnitMatch_folder_from_sorting_analyzers(
+    analyzers, save_dir, overwrite=False
+):
     """
     Creates a folder called `save_dir` for a single session,
     which can be used to run UnitMatch.
@@ -651,9 +655,6 @@ def make_UnitMatch_folder_from_sorting_analyzers(analyzers, save_dir):
         Session{i}/
             # (num_units, 3) dimensional array of channel locations
             channel_locations.npy 
-            
-            # List of curated labels, using BombCell
-            bombcell_labels.tsv 
             
             # (num_time_samples, num_channels, 2) array of average waveforms 
             # for each unit. Each file contains the average waveform for both
@@ -667,13 +668,10 @@ def make_UnitMatch_folder_from_sorting_analyzers(analyzers, save_dir):
             waveform_params.json
     """
 
-    # only import spikeinterface here, so that non-si users don't need to have it in their env
-    import spikeinterface.full as si
-
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True)
 
-    required_extensions = ['random_spikes', 'waveforms', 'templates', 'template_metrics', 'quality_metrics']
+    required_extensions = ["random_spikes", "waveforms"]
 
     for session_index, analyzer in enumerate(analyzers):
 
@@ -682,10 +680,19 @@ def make_UnitMatch_folder_from_sorting_analyzers(analyzers, save_dir):
             if not analyzer.has_extension(extension):
                 missing_extensions.append(extension)
         if len(missing_extensions) > 0:
-            raise ValueError(f"Analyzer must have {missing_extensions} extensions computed.\n" \
-                "Please compute them by running `sorting_analyzer.compute({missing_extensions})")
+            raise ValueError(
+                f"Analyzer must have {missing_extensions} extensions computed.\n"
+                f"Please compute them by running "
+                f"`sorting_analyzer.compute({missing_extensions})`"
+            )
 
         session_dir = save_dir / f'Session{session_index}'
+        if session_dir.exists():
+            if not overwrite:
+                raise FileExistsError(
+                    f"{session_dir} already exists. Pass overwrite=True to replace it."
+                )
+            shutil.rmtree(session_dir)
         session_dir.mkdir()
 
         # TEMPLATES / RAWSPIKES
@@ -694,7 +701,7 @@ def make_UnitMatch_folder_from_sorting_analyzers(analyzers, save_dir):
         waveforms = analyzer.get_extension('waveforms')
         random_spikes = analyzer.get_extension('random_spikes')
 
-        for unit_id in analyzer.unit_ids:
+        for unit_id in tqdm(analyzer.unit_ids, desc=f"Exporting Session{session_index}"):
 
             both_halves_average_waveform_dense = np.zeros((np.shape(waveforms.get_data())[1], analyzer.get_num_channels(), 2))
 
@@ -713,11 +720,6 @@ def make_UnitMatch_folder_from_sorting_analyzers(analyzers, save_dir):
             both_halves_average_waveform_dense[:, channel_indices, 1] = second_half_average_waveform_sparse[:, :channel_indices.size]
 
             np.save(session_dir / f"Unit{unit_id}_RawSpikes.npy", both_halves_average_waveform_dense)
-
-        # UNIT CURATION
-
-        bombcell_labels = si.bombcell_label_units(analyzer)
-        bombcell_labels.to_csv(session_dir / "bombcell_labels.tsv", sep='\t')
 
         # CHANNEL POSITION
         

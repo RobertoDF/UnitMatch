@@ -156,134 +156,173 @@ def filter_units_by_index(
     )
 
 
-def load_good_waveforms(wave_paths, unit_label_paths, param, good_units_only=True):
-    if len(wave_paths) == len(unit_label_paths):
-        n_sessions = len(wave_paths)
-    else:
-        print("Warning: gave different number of paths for waveforms and labels!")
+def _as_unit_ids(unit_ids, session_index):
+    unit_ids = np.asarray(unit_ids).reshape(-1)
+    if unit_ids.size == 0:
+        raise ValueError(f"Session {session_index} does not contain any requested units.")
+
+    normalized_ids = [
+        unit_id.item() if isinstance(unit_id, np.generic) else unit_id
+        for unit_id in unit_ids
+    ]
+    try:
+        has_duplicates = len(set(normalized_ids)) != len(normalized_ids)
+    except TypeError as error:
+        raise ValueError(
+            f"Session {session_index} contains an unhashable unit ID."
+        ) from error
+    if has_duplicates:
+        raise ValueError(f"Session {session_index} contains duplicate unit IDs.")
+    return unit_ids
+
+
+def _update_waveform_params(param, waveform):
+    param["spike_width"] = int(param["spike_width"])
+    param["peak_loc"] = int(param["peak_loc"])
+    param["waveidx"] = np.asarray(param["waveidx"], dtype=int)
+
+    actual_width = waveform.shape[1]
+    if param["spike_width"] == actual_width:
         return
 
-    good_units = []
-    n_units_per_session_all = []
-    all_units = []
+    print(
+        f"Warning: loaded waveform spike_width ({actual_width}) does not match "
+        f"param['spike_width'] ({param['spike_width']}). Updating to match data."
+    )
+    param["spike_width"] = actual_width
+    param["peak_loc"] = int(np.floor(actual_width / 2))
+    param["waveidx"] = np.arange(
+        param["peak_loc"] - 8, param["peak_loc"] + 15, dtype=int
+    )
 
-    if good_units_only:
-        for i in range(len(unit_label_paths)):
-            if os.path.split(unit_label_paths[0])[1] == "cluster_bc_unitType.tsv":
-                unit_label = load_tsv(unit_label_paths[i])
-                tmp_idx = np.argwhere(
-                    np.isin(unit_label[:, 1], ["GOOD", "NON-SOMA GOOD"])
-                )
-            else:
-                unit_label = load_tsv(unit_label_paths[i])
-                tmp_idx = np.argwhere(unit_label[:, 1] == "good")
 
-            n_units_per_session_all.append(unit_label.shape[0])
-            good_unit_idx = unit_label[tmp_idx, 0]
-            good_units.append(good_unit_idx)
-            all_units.append(unit_label[:, 0])
+def load_waveforms(
+    wave_paths, unit_ids_per_session, param, n_units_per_session_all=None
+):
+    """
+    Load UnitMatch waveform files for explicit unit IDs.
 
-    waveforms = []
-    successful_sessions = []
-    if good_units_only:
-        for ls in range(len(wave_paths)):
-            tmp_waveform = None
-            tmp = None
-            try:
-                p_file = os.path.join(
-                    wave_paths[ls],
-                    f"Unit{int(good_units[ls][0].squeeze())}_RawSpikes.npy",
-                )
-                tmp = np.load(p_file)
-                tmp_waveform = np.zeros(
-                    (len(good_units[ls]), tmp.shape[0], tmp.shape[1], tmp.shape[2])
-                )
+    Parameters
+    ----------
+    wave_paths : list
+        One UnitMatch waveform directory per session.
+    unit_ids_per_session : list
+        Unit IDs to load from each session, in the desired output order.
+    param : dict
+        UnitMatch parameter dictionary.
+    n_units_per_session_all : array-like, optional
+        Total unit count before selection for each session. Defaults to the
+        number of requested units.
 
-                for i in range(len(good_units[ls])):
-                    p_file_good = os.path.join(
-                        wave_paths[ls],
-                        f"Unit{int(good_units[ls][i].squeeze())}_RawSpikes.npy",
-                    )
-                    tmp_waveform[i] = np.load(p_file_good)
-                waveforms.append(tmp_waveform)
-                successful_sessions.append(ls)
-            except Exception as e:
-                print(f"Error loading waveform for session {ls}: {e}")
-            finally:
-                del tmp_waveform
-                del tmp
-    else:
-        for ls in range(len(wave_paths)):
-            tmp_waveform = None
-            tmp = None
-            try:
-                p_file = os.path.join(wave_paths[ls], "Unit0_RawSpikes.npy")
-                tmp = np.load(p_file)
-                tmp_waveform = np.zeros(
-                    (
-                        len(os.listdir(wave_paths[ls])),
-                        tmp.shape[0],
-                        tmp.shape[1],
-                        tmp.shape[2],
-                    )
-                )
-
-                for i in range(len(os.listdir(wave_paths[ls]))):
-                    p_file_good = os.path.join(wave_paths[ls], f"Unit{i}_RawSpikes.npy")
-                    tmp_waveform[i] = np.load(p_file_good)
-                waveforms.append(tmp_waveform)
-                successful_sessions.append(ls)
-                print(
-                    f"UnitMatch is treating all the units as good and including all units from {wave_paths[ls]}, we recommended using curated data!"
-                )
-            except Exception as e:
-                print(f"Error loading waveform for session {ls}: {e}")
-            finally:
-                del tmp_waveform
-                del tmp
-
-    if len(successful_sessions) < n_sessions:
-        failed = [i for i in range(n_sessions) if i not in successful_sessions]
-        print(
-            f"Warning: failed to load waveforms for {len(failed)} session(s): {failed}. Excluding from analysis."
+    Returns
+    -------
+    tuple
+        Waveforms and their session metadata, followed by normalized unit IDs
+        and the updated parameter dictionary.
+    """
+    if len(wave_paths) != len(unit_ids_per_session):
+        raise ValueError(
+            "wave_paths and unit_ids_per_session must contain the same number "
+            f"of sessions, got {len(wave_paths)} and {len(unit_ids_per_session)}."
         )
-        good_units = [good_units[i] for i in successful_sessions]
-        n_units_per_session_all = [
-            n_units_per_session_all[i] for i in successful_sessions
-        ]
-        n_sessions = len(successful_sessions)
+    if not wave_paths:
+        raise ValueError("At least one waveform session is required.")
 
-    n_units_per_session = np.zeros(n_sessions, dtype="int")
-    waveform = np.array([])
+    unit_ids_per_session = [
+        _as_unit_ids(unit_ids, session_index)
+        for session_index, unit_ids in enumerate(unit_ids_per_session)
+    ]
+    n_units_per_session = np.asarray(
+        [unit_ids.size for unit_ids in unit_ids_per_session], dtype=int
+    )
 
-    for i in range(n_sessions):
-        if i == 0:
-            waveform = waveforms[i]
-        else:
-            waveform = np.concatenate((waveform, waveforms[i]), axis=0)
+    if n_units_per_session_all is None:
+        n_units_per_session_all = n_units_per_session.copy()
+    else:
+        n_units_per_session_all = np.asarray(
+            n_units_per_session_all, dtype=int
+        ).reshape(-1)
+        if n_units_per_session_all.size != len(wave_paths):
+            raise ValueError(
+                "n_units_per_session_all must contain one count per session."
+            )
+        if np.any(n_units_per_session_all < n_units_per_session):
+            raise ValueError(
+                "Each total unit count must be at least the number of requested units."
+            )
 
-        n_units_per_session[i] = waveforms[i].shape[0]
+    session_waveforms = []
+    waveform_shape = None
+    for session_index, (wave_path, unit_ids) in enumerate(
+        zip(wave_paths, unit_ids_per_session)
+    ):
+        unit_waveforms = []
+        for unit_id in unit_ids:
+            waveform_path = os.path.join(
+                wave_path, f"Unit{unit_id}_RawSpikes.npy"
+            )
+            try:
+                unit_waveform = np.load(waveform_path)
+            except Exception as error:
+                raise ValueError(
+                    f"Could not load waveform for session {session_index}, "
+                    f"unit {unit_id!r} from '{waveform_path}'."
+                ) from error
 
+            if unit_waveform.ndim != 3:
+                raise ValueError(
+                    f"Waveform for session {session_index}, unit {unit_id!r} "
+                    f"must be 3-dimensional, got shape {unit_waveform.shape}."
+                )
+            if waveform_shape is None:
+                waveform_shape = unit_waveform.shape
+            elif unit_waveform.shape != waveform_shape:
+                raise ValueError(
+                    f"Waveform for session {session_index}, unit {unit_id!r} "
+                    f"has shape {unit_waveform.shape}; expected {waveform_shape}."
+                )
+            unit_waveforms.append(unit_waveform)
+        session_waveforms.append(np.stack(unit_waveforms))
+
+    waveform = np.concatenate(session_waveforms, axis=0)
     param["n_units"], session_id, session_switch, param["n_sessions"] = (
         get_session_data(n_units_per_session)
     )
-    within_session = get_within_session(session_id, param)
     param["n_channels"] = waveform.shape[2]
     param["n_units_per_session"] = n_units_per_session_all
+    within_session = get_within_session(session_id, param)
+    _update_waveform_params(param, waveform)
 
-    actual_width = waveform.shape[1]
-    if param["spike_width"] != actual_width:
-        print(
-            f"Warning: loaded waveform spike_width ({actual_width}) does not match "
-            f"param['spike_width'] ({param['spike_width']}). Updating to match data."
-        )
-        param["spike_width"] = actual_width
-        param["peak_loc"] = int(np.floor(actual_width / 2))
-        param["waveidx"] = np.arange(
-            param["peak_loc"] - 8, param["peak_loc"] + 15, dtype=int
+    return (
+        waveform,
+        session_id,
+        session_switch,
+        within_session,
+        unit_ids_per_session,
+        param,
+    )
+
+
+def load_good_waveforms(wave_paths, unit_label_paths, param, good_units_only=True):
+    """Load curated waveforms using legacy UnitMatch label files."""
+    if len(wave_paths) != len(unit_label_paths):
+        raise ValueError(
+            "wave_paths and unit_label_paths must contain the same number of sessions."
         )
 
-    return waveform, session_id, session_switch, within_session, good_units, param
+    unit_ids_per_session = get_good_units(
+        unit_label_paths, good=good_units_only
+    )
+    n_units_per_session_all = [
+        load_tsv(unit_label_path).shape[0]
+        for unit_label_path in unit_label_paths
+    ]
+    return load_waveforms(
+        wave_paths,
+        unit_ids_per_session,
+        param,
+        n_units_per_session_all=n_units_per_session_all,
+    )
 
 
 def get_good_units(unit_label_paths, good=True):
@@ -306,82 +345,37 @@ def get_good_units(unit_label_paths, good=True):
         A list of all the good unit ids
     """
     good_units = []
-    for i in range(len(unit_label_paths)):
-        # see if bombcell unit labels
-        if os.path.split(unit_label_paths[0])[1] == "cluster_bc_unitType.tsv":
-            unit_label = load_tsv(unit_label_paths[i])
-            if good == True:
-                tmp_idx = np.argwhere(
-                    np.isin(unit_label[:, 1], ["GOOD", "NON-SOMA GOOD"])
+    for session_index, unit_label_path in enumerate(unit_label_paths):
+        unit_label = load_tsv(unit_label_path)
+        if unit_label.ndim != 2 or unit_label.shape[1] < 2:
+            raise ValueError(
+                f"Unit labels for session {session_index} must contain unit IDs "
+                "and labels."
+            )
+
+        if good:
+            if os.path.basename(unit_label_path) == "cluster_bc_unitType.tsv":
+                selected = np.isin(
+                    unit_label[:, 1], ["GOOD", "NON-SOMA GOOD"]
                 )
             else:
-                tmp_idx = unit_label[:, 0].astype(np.int32)
-            tmp_idx = tmp_idx[
-                :, np.newaxis
-            ]  # keep the array shape consistent between different methods
+                selected = unit_label[:, 1] == "good"
+            unit_ids = unit_label[selected, 0]
         else:
-            unit_label = load_tsv(unit_label_paths[i])
-            if good == True:
-                tmp_idx = np.argwhere(unit_label[:, 1] == "good")
-            else:
-                tmp_idx = unit_label[:, 0].astype(
-                    np.int32
-                )  # every unit index in the first column
-
-        good_unit_idx = unit_label[tmp_idx, 0]
-        good_units.append(good_unit_idx)
+            unit_ids = unit_label[:, 0]
+        good_units.append(_as_unit_ids(unit_ids, session_index))
     return good_units
 
 
 def load_good_units(good_units, wave_paths, param):
-    if len(wave_paths) == len(good_units):
-        n_sessions = len(wave_paths)
-    else:
-        print("Warning: gave different number of paths for waveforms and labels!")
-        return
-
-    waveforms = []
-    for ls in range(len(wave_paths)):
-        try:
-            p_file = os.path.join(
-                wave_paths[ls], f"Unit{int(good_units[ls][0].squeeze())}_RawSpikes.npy"
-            )
-            tmp = np.load(p_file)
-            tmp_waveform = np.zeros(
-                (len(good_units[ls]), tmp.shape[0], tmp.shape[1], tmp.shape[2])
-            )
-
-            for i in range(len(good_units[ls])):
-                tmp_path_good = os.path.join(
-                    wave_paths[ls],
-                    f"Unit{int(good_units[ls][i].squeeze())}_RawSpikes.npy",
-                )
-                tmp_waveform[i] = np.load(tmp_path_good)
-            waveforms.append(tmp_waveform)
-        except Exception as e:
-            print(f"Error loading waveform for session {ls}: {e}")
-        finally:
-            del tmp_waveform
-            del tmp
-
-    n_units_per_session = np.zeros(n_sessions, dtype="int")
-    waveform = np.array([])
-
-    for i in range(n_sessions):
-        if i == 0:
-            waveform = waveforms[i]
-        else:
-            waveform = np.concatenate((waveform, waveforms[i]), axis=0)
-
-        n_units_per_session[i] = waveforms[i].shape[0]
-
-    param["n_units"], session_id, session_switch, param["n_sessions"] = (
-        get_session_data(n_units_per_session)
-    )
-    within_session = get_within_session(session_id, param)
-    param["n_channels"] = waveform.shape[2]
-    param["n_units_per_session"] = n_units_per_session
-
+    (
+        waveform,
+        session_id,
+        session_switch,
+        within_session,
+        _,
+        param,
+    ) = load_waveforms(wave_paths, good_units, param)
     return waveform, session_id, session_switch, within_session, param
 
 
