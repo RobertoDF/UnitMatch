@@ -1,7 +1,10 @@
 import numpy as np
 import pytest
 
-from UnitMatchPy.assign_unique_id import _filter_pairs_by_isi
+from UnitMatchPy.assign_unique_id import (
+    _filter_pairs_by_isi,
+    get_within_session_merge_groups,
+)
 
 
 def _params():
@@ -53,3 +56,42 @@ def test_isi_filter_validates_direct_spike_times():
 
     with pytest.raises(ValueError, match="one array per UnitMatch unit"):
         _filter_pairs_by_isi(np.array([[0, 1]]), clus_info, _params())
+
+
+def test_merge_groups_require_both_directions_and_isi_safety():
+    probabilities = np.array(
+        [
+            [1.0, 0.90, 0.95, 0.10],
+            [0.80, 1.0, 0.85, 0.10],
+            [0.40, 0.70, 1.0, 0.95],
+            [0.10, 0.10, 0.90, 1.0],
+        ]
+    )
+    clus_info = {
+        "session_id": np.array([0, 0, 0, 0]),
+        "original_ids": np.array([10, 11, 12, 13]),
+        "spike_times": [
+            np.array([0.0, 0.1, 0.2]),
+            np.array([0.05, 0.15, 0.25]),
+            np.array([0.0, 0.1, 0.2]),
+            np.array([0.1005, 0.2005, 0.3005]),
+        ],
+    }
+
+    groups = get_within_session_merge_groups(
+        probabilities, _params(), clus_info, match_threshold=0.5
+    )
+
+    assert groups == [[10, 11]]
+
+
+def test_merge_groups_require_spike_source():
+    clus_info = {
+        "session_id": np.array([0, 0]),
+        "original_ids": np.array([10, 11]),
+    }
+
+    with pytest.raises(ValueError, match="ISI safety check"):
+        get_within_session_merge_groups(
+            np.array([[1.0, 0.9], [0.8, 1.0]]), _params(), clus_info
+        )

@@ -139,6 +139,72 @@ def _filter_pairs_by_isi(pairs, clus_info, param):
     return isi_exclude
 
 
+def get_within_session_merge_groups(
+    output_prob_array, param, clus_info, match_threshold=None
+):
+    """Return disjoint, ISI-safe unit pairs for session-local merging.
+
+    A pair is proposed only when both split-half comparison directions exceed
+    the probability threshold. Pairs are considered from highest to lowest
+    mean probability, and each unit is included at most once. Run UnitMatch
+    again after merging to discover additional over-splits.
+    """
+    output_prob_array = np.asarray(output_prob_array)
+    if output_prob_array.ndim != 2 or output_prob_array.shape[0] != output_prob_array.shape[1]:
+        raise ValueError("output_prob_array must be a square matrix.")
+
+    n_units = output_prob_array.shape[0]
+    session_ids = np.asarray(clus_info["session_id"])
+    original_ids = np.asarray(clus_info["original_ids"])
+    if len(session_ids) != n_units or len(original_ids) != n_units:
+        raise ValueError(
+            "clus_info session_id and original_ids must align with output_prob_array."
+        )
+    if "spike_times" not in clus_info and "KS_dirs" not in param:
+        raise ValueError(
+            "Automatic merge proposals require clus_info['spike_times'] "
+            "or param['KS_dirs'] for the ISI safety check."
+        )
+
+    threshold = (
+        param["match_threshold"] if match_threshold is None else match_threshold
+    )
+    pair_mask = (output_prob_array > threshold) & (
+        output_prob_array.T > threshold
+    )
+    pair_mask &= session_ids[:, None] == session_ids[None, :]
+    candidate_pairs = np.argwhere(np.triu(pair_mask, k=1))
+    if candidate_pairs.size == 0:
+        return []
+
+    isi_exclude = _filter_pairs_by_isi(candidate_pairs, clus_info, param)
+    candidate_pairs = candidate_pairs[~isi_exclude]
+    if candidate_pairs.size == 0:
+        return []
+
+    mean_probability = np.mean(
+        np.column_stack(
+            (
+                output_prob_array[candidate_pairs[:, 0], candidate_pairs[:, 1]],
+                output_prob_array[candidate_pairs[:, 1], candidate_pairs[:, 0]],
+            )
+        ),
+        axis=1,
+    )
+    order = np.argsort(-mean_probability, kind="stable")
+
+    merge_groups = []
+    assigned_units = set()
+    for unit_a, unit_b in candidate_pairs[order]:
+        if unit_a in assigned_units or unit_b in assigned_units:
+            continue
+        merge_groups.append(
+            [original_ids[unit_a].item(), original_ids[unit_b].item()]
+        )
+        assigned_units.update((unit_a, unit_b))
+    return merge_groups
+
+
 def assign_unique_id(output_prob_array, param, clus_info):
     """
     Assign units to a common group depending on different criteria:
