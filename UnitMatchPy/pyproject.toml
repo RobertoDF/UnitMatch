@@ -53,7 +53,7 @@ full = [
   "mat73>=0.62,<1.0",
   "spikeinterface>=0.100,<0.120", 
 ]
-notebooks = ["ipykernel>=6,<7"]
+notebooks = ["ipykernel>=6,<7", "ipywidgets>=8,<9"]
 dev = ["pytest", "ruff", "mypy", "build", "twine"]
 parity = ["pytest", "spikeinterface>=0.100,<0.120"]
 
