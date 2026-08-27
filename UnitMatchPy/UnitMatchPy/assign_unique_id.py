@@ -1,4 +1,6 @@
 import os
+import warnings
+
 import numpy as np
 
 
@@ -29,22 +31,39 @@ def _filter_pairs_by_isi(pairs, clus_info, param):
     ISI refractory-period violations.
 
     Only same-session pairs are evaluated; all cross-session pairs keep False.
-    Skips silently when param['KS_dirs'] is absent or IO fails.
+    Spike times can be supplied directly in ``clus_info["spike_times"]`` as one
+    seconds-based array per UnitMatch unit. Kilosort files remain the fallback.
     """
     isi_exclude = np.zeros(len(pairs), dtype=bool)
 
     if not param.get("remove_over_merges", True):
         return isi_exclude
-    if "KS_dirs" not in param:
+
+    session_ids = clus_info["session_id"]
+    same_session = session_ids[pairs[:, 0]] == session_ids[pairs[:, 1]]
+    if not np.any(same_session):
         return isi_exclude
 
     refrac_ms = param.get("isi_viol_refrac_ms", 1.5)
     min_frac = param.get("isi_min_fraction_refractory_violations", 0.01)
     ratio_thrs = param.get("isi_viol_ratio_thrs", 1.5)
 
-    session_ids = clus_info["session_id"]
     original_ids = clus_info["original_ids"]
-    ks_dirs = param["KS_dirs"]
+    spike_times = clus_info.get("spike_times")
+    if spike_times is not None and len(spike_times) != len(session_ids):
+        raise ValueError(
+            "clus_info['spike_times'] must contain one array per UnitMatch unit."
+        )
+
+    ks_dirs = param.get("KS_dirs")
+    if spike_times is None and ks_dirs is None:
+        warnings.warn(
+            "ISI over-merge checking was requested but no spike times are available. "
+            "Provide clus_info['spike_times'] or param['KS_dirs'].",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return isi_exclude
 
     spike_cache = {}  # sess_id -> (spike_times_sec, spike_clusters) or None
 
@@ -56,7 +75,10 @@ def _filter_pairs_by_isi(pairs, clus_info, param):
         if sess_a != sess_b:
             continue
 
-        if sess_a not in spike_cache:
+        if spike_times is not None:
+            st_a = np.sort(np.asarray(spike_times[uid_a], dtype=float))
+            st_b = np.sort(np.asarray(spike_times[uid_b], dtype=float))
+        elif sess_a not in spike_cache:
             try:
                 ks_dir = ks_dirs[sess_a]
                 st_path = os.path.join(ks_dir, "spike_times.npy")
@@ -75,23 +97,21 @@ def _filter_pairs_by_isi(pairs, clus_info, param):
                     spike_cache[sess_a] = (st / sample_rate, sc)
                 else:
                     spike_cache[sess_a] = None
-            except Exception:
+            except (OSError, ValueError, EOFError):
                 spike_cache[sess_a] = None
 
-        if spike_cache[sess_a] is None:
-            continue
+        if spike_times is None:
+            if spike_cache[sess_a] is None:
+                continue
 
-        st_sec, sc = spike_cache[sess_a]
-        clus_a = original_ids[uid_a]
-        clus_b = original_ids[uid_b]
+            st_sec, sc = spike_cache[sess_a]
+            mask_a = sc == original_ids[uid_a]
+            mask_b = sc == original_ids[uid_b]
+            if not np.any(mask_a) or not np.any(mask_b):
+                continue
+            st_a = np.sort(st_sec[mask_a])
+            st_b = np.sort(st_sec[mask_b])
 
-        mask_a = sc == clus_a
-        mask_b = sc == clus_b
-        if not np.any(mask_a) or not np.any(mask_b):
-            continue
-
-        st_a = np.sort(st_sec[mask_a])
-        st_b = np.sort(st_sec[mask_b])
         st_merged = np.sort(np.concatenate([st_a, st_b]))
 
         diffs_a = np.diff(st_a) * 1000
