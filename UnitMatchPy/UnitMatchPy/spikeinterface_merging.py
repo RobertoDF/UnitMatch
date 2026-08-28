@@ -265,8 +265,7 @@ class SpikeInterfaceSessionMerger:
             channel_locations,
         )
 
-    @staticmethod
-    def _probe_plot_axes(channel_locations):
+    def _probe_plot_axes(self, channel_locations):
         coordinate_ranges = np.ptp(channel_locations, axis=0)
         depth_axis = int(np.argmax(coordinate_ranges))
         remaining_axes = [

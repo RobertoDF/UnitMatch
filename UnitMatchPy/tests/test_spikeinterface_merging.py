@@ -119,6 +119,16 @@ def test_unit_diagnostics_include_waveform_and_peak_location():
     np.testing.assert_array_equal(channel_locations, [[0, 0], [0, 20]])
 
 
+def test_group_figure_renders_waveforms_and_probe_locations():
+    merger = SpikeInterfaceSessionMerger(_Analyzer())
+
+    figure = merger._make_group_figure([10, 11])
+
+    assert len(figure.axes) == 2
+    assert figure.axes[0].get_title() == "Mean waveform on peak channel"
+    assert figure.axes[1].get_title() == "Peak location on probe"
+
+
 def test_save_requires_applied_analyzer(tmp_path):
     merger = SpikeInterfaceSessionMerger(_Analyzer())
 
