@@ -41,8 +41,12 @@ class _Analyzer:
             return _RandomSpikes()
         raise AssertionError(name)
 
-    def merge_units(self, **kwargs):
-        self.merge_kwargs = kwargs
+    def merge_units(self, merge_unit_groups, censor_ms, merging_mode):
+        self.merge_kwargs = {
+            "merge_unit_groups": merge_unit_groups,
+            "censor_ms": censor_ms,
+            "merging_mode": merging_mode,
+        }
         return "merged"
 
 
@@ -101,7 +105,7 @@ def test_apply_soft_merges_only_approved_groups():
     assert result == "merged"
     assert analyzer.merge_kwargs == {
         "merge_unit_groups": [[10, 11]],
-        "censored_period_ms": 0.75,
+        "censor_ms": 0.75,
         "merging_mode": "soft",
     }
 
@@ -190,8 +194,12 @@ def test_replaced_source_units_are_not_selected(monkeypatch):
         return "combined-sorting"
 
     class _CombinedAnalyzer:
-        def merge_units(self, **kwargs):
-            return kwargs
+        def merge_units(self, merge_unit_groups, censor_ms, merging_mode):
+            return {
+                "merge_unit_groups": merge_unit_groups,
+                "censor_ms": censor_ms,
+                "merging_mode": merging_mode,
+            }
 
     def create_sorting_analyzer(**kwargs):
         assert kwargs["sorting"] == "combined-sorting"

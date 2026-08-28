@@ -1,3 +1,4 @@
+import inspect
 import json
 import shutil
 import tempfile
@@ -530,10 +531,24 @@ class SpikeInterfaceSessionMerger:
                     "Hard merging requires access to the recording traces. "
                     "Use merging_mode='soft' for a recordingless analyzer."
                 )
+            merge_parameters = inspect.signature(
+                combined_analyzer.merge_units
+            ).parameters
+            if "censor_ms" in merge_parameters:
+                censor_argument = {"censor_ms": self.censored_period_ms}
+            elif "censored_period_ms" in merge_parameters:
+                censor_argument = {
+                    "censored_period_ms": self.censored_period_ms
+                }
+            else:
+                raise TypeError(
+                    "Unsupported SpikeInterface merge_units() signature: "
+                    "missing censor_ms/censored_period_ms."
+                )
             self.merged_analyzer = combined_analyzer.merge_units(
                 merge_unit_groups=self.approved_groups,
-                censored_period_ms=self.censored_period_ms,
                 merging_mode=self.merging_mode,
+                **censor_argument,
             )
         else:
             self.merged_analyzer = combined_analyzer
