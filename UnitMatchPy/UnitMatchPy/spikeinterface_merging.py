@@ -28,7 +28,7 @@ class SpikeInterfaceSessionMerger:
         analyzer,
         unit_ids=None,
         match_threshold=0.5,
-        censored_period_ms=0.5,
+        censored_period_ms=None,
         merging_mode="soft",
     ):
         if isinstance(analyzer, Sequence):
