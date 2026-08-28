@@ -3,6 +3,10 @@ import pytest
 from UnitMatchPy.spikeinterface_merging import SpikeInterfaceSessionMerger
 
 
+def test_session_merger_uses_conservative_spatial_limit():
+    assert SpikeInterfaceSessionMerger.MAX_DISTANCE_UM == 50
+
+
 class _Analyzer:
     unit_ids = np.array([10, 11, 12])
     sampling_frequency = 30_000

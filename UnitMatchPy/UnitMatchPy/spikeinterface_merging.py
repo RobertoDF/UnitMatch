@@ -20,8 +20,12 @@ class SpikeInterfaceSessionMerger:
 
     Multiple analyzers can be supplied when a curation pipeline stores unchanged
     and replacement units separately. In that case ``unit_ids`` must contain the
-    final unit IDs from the consolidated metrics table.
+    final unit IDs from the consolidated metrics table. Same-session candidates
+    must have centroids within 50 um, a more conservative limit than UnitMatch's
+    100 um default for matching units across recording sessions.
     """
+
+    MAX_DISTANCE_UM = 50
 
     def __init__(
         self,
@@ -161,6 +165,7 @@ class SpikeInterfaceSessionMerger:
             param.update(waveform_params)
             param["waveidx"] = np.asarray(param["waveidx"], dtype=int)
             param["match_threshold"] = self.match_threshold
+            param["max_dist"] = self.MAX_DISTANCE_UM
             param = util.get_probe_geometry(channel_pos[0], param)
 
             unit_ids_per_session = [self.unit_ids]
