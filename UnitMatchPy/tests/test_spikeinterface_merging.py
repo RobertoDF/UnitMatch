@@ -35,8 +35,11 @@ class _Analyzer:
         return 2
 
     def get_extension(self, name):
-        assert name == "waveforms"
-        return _Waveforms()
+        if name == "waveforms":
+            return _Waveforms()
+        if name == "random_spikes":
+            return _RandomSpikes()
+        raise AssertionError(name)
 
     def merge_units(self, **kwargs):
         self.merge_kwargs = kwargs
@@ -49,6 +52,11 @@ class _Sorting:
 
     def select_units(self, unit_ids):
         return tuple(unit_ids)
+
+    @staticmethod
+    def get_unit_spike_train(unit_id):
+        del unit_id
+        return np.array([0, 30_000, 60_000])
 
 
 class _Waveforms:
@@ -64,6 +72,13 @@ class _Waveforms:
                 [[0.0, 0.0], [-4.0, -2.0], [0.0, 0.0]],
             ]
         )
+
+
+class _RandomSpikes:
+    @staticmethod
+    def get_selected_indices_in_spike_train(unit_id, segment_index):
+        del unit_id, segment_index
+        return np.array([0, 2])
 
 
 def test_apply_requires_all_proposals_reviewed():
@@ -109,7 +124,14 @@ def test_rejects_unknown_merging_mode():
 def test_unit_diagnostics_include_waveform_and_peak_location():
     merger = SpikeInterfaceSessionMerger(_Analyzer())
 
-    times_ms, waveform, peak_location, channel_locations = (
+    (
+        times_ms,
+        waveform,
+        peak_location,
+        channel_locations,
+        spike_times_s,
+        spike_amplitudes,
+    ) = (
         merger._get_unit_diagnostics(10)
     )
 
@@ -117,6 +139,8 @@ def test_unit_diagnostics_include_waveform_and_peak_location():
     np.testing.assert_allclose(waveform, [0.0, -3.0, 0.0])
     np.testing.assert_array_equal(peak_location, [0, 0])
     np.testing.assert_array_equal(channel_locations, [[0, 0], [0, 20]])
+    np.testing.assert_array_equal(spike_times_s, [0.0, 2.0])
+    np.testing.assert_array_equal(spike_amplitudes, [-2.0, -4.0])
 
 
 def test_group_figure_renders_waveforms_and_probe_locations():
@@ -124,9 +148,10 @@ def test_group_figure_renders_waveforms_and_probe_locations():
 
     figure = merger._make_group_figure([10, 11])
 
-    assert len(figure.axes) == 2
+    assert len(figure.axes) == 3
     assert figure.axes[0].get_title() == "Mean waveform on peak channel"
     assert figure.axes[1].get_title() == "Peak location on probe"
+    assert figure.axes[2].get_title() == "Spike amplitudes over time"
 
 
 def test_save_requires_applied_analyzer(tmp_path):

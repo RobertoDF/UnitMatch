@@ -250,6 +250,9 @@ class SpikeInterfaceSessionMerger:
             channel_indices = analyzer.sparsity.unit_id_to_channel_indices[unit_id]
         mean_waveforms = mean_waveforms[:, : channel_indices.size]
         peak_channel_index = np.argmax(np.max(np.abs(mean_waveforms), axis=0))
+        peak_sample_index = np.argmax(
+            np.abs(mean_waveforms[:, peak_channel_index])
+        )
 
         ms_before = waveforms_extension.params["ms_before"]
         times_ms = (
@@ -258,11 +261,32 @@ class SpikeInterfaceSessionMerger:
         )
         channel_locations = analyzer.get_channel_locations()
         peak_location = channel_locations[channel_indices[peak_channel_index]]
+        random_spikes = analyzer.get_extension("random_spikes")
+        selected_spike_indices = random_spikes.get_selected_indices_in_spike_train(
+            unit_id=unit_id,
+            segment_index=0,
+        )
+        if selected_spike_indices.size != waveforms.shape[0]:
+            raise ValueError(
+                f"Unit {unit_id} has {selected_spike_indices.size} selected spikes "
+                f"but {waveforms.shape[0]} stored waveforms."
+            )
+        spike_times_s = (
+            analyzer.sorting.get_unit_spike_train(unit_id=unit_id)[
+                selected_spike_indices
+            ]
+            / analyzer.sampling_frequency
+        )
+        spike_amplitudes = waveforms[
+            :, peak_sample_index, peak_channel_index
+        ]
         return (
             times_ms,
             mean_waveforms[:, peak_channel_index],
             peak_location,
             channel_locations,
+            spike_times_s,
+            spike_amplitudes,
         )
 
     def _probe_plot_axes(self, channel_locations):
@@ -285,12 +309,12 @@ class SpikeInterfaceSessionMerger:
         diagnostics = [
             self._get_unit_diagnostics(unit_id) for unit_id in group
         ]
-        figure, (waveform_axis, probe_axis) = plt.subplots(
-            1, 2, figsize=(8, 3), constrained_layout=True
+        figure, (waveform_axis, probe_axis, amplitude_axis) = plt.subplots(
+            1, 3, figsize=(12, 3), constrained_layout=True
         )
 
         for unit_id, color, diagnostic in zip(group, colors, diagnostics):
-            times_ms, waveform, _, _ = diagnostic
+            times_ms, waveform = diagnostic[:2]
             waveform_axis.plot(
                 times_ms, waveform, color=color, label=f"Unit {unit_id}"
             )
@@ -328,6 +352,23 @@ class SpikeInterfaceSessionMerger:
             ylabel=f"Coordinate {depth_axis} (um)",
         )
         probe_axis.legend(fontsize="small")
+
+        for unit_id, color, diagnostic in zip(group, colors, diagnostics):
+            spike_times_s, spike_amplitudes = diagnostic[4:6]
+            amplitude_axis.scatter(
+                spike_times_s,
+                spike_amplitudes,
+                color=color,
+                s=10,
+                alpha=0.6,
+                label=f"Unit {unit_id}",
+            )
+        amplitude_axis.set(
+            title="Spike amplitudes over time",
+            xlabel="Time (s)",
+            ylabel="Signed peak amplitude",
+        )
+        amplitude_axis.legend(fontsize="small")
         return figure
 
     def display_review(self, show_diagnostics=True):
