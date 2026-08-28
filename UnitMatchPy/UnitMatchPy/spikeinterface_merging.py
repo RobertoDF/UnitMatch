@@ -343,6 +343,7 @@ class SpikeInterfaceSessionMerger:
                 color=color,
                 edgecolor="black",
                 s=80,
+                alpha=0.5,
                 label=f"Unit {unit_id} peak",
                 zorder=3,
             )
