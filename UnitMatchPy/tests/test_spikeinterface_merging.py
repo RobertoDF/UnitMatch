@@ -67,6 +67,21 @@ def test_apply_soft_merges_only_approved_groups():
     }
 
 
+def test_apply_forwards_hard_merging_mode():
+    analyzer = _Analyzer()
+    merger = SpikeInterfaceSessionMerger(analyzer, merging_mode="hard")
+    merger.decisions = {(10, 11): True}
+
+    merger.apply_merges()
+
+    assert analyzer.merge_kwargs["merging_mode"] == "hard"
+
+
+def test_rejects_unknown_merging_mode():
+    with pytest.raises(ValueError, match="either 'soft' or 'hard'"):
+        SpikeInterfaceSessionMerger(_Analyzer(), merging_mode="automatic")
+
+
 def test_save_requires_applied_analyzer(tmp_path):
     merger = SpikeInterfaceSessionMerger(_Analyzer())
 

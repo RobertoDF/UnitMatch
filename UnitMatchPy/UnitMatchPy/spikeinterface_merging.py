@@ -28,6 +28,7 @@ class SpikeInterfaceSessionMerger:
         unit_ids=None,
         match_threshold=0.5,
         censored_period_ms=0.5,
+        merging_mode="soft",
     ):
         if isinstance(analyzer, Sequence):
             self.analyzers = list(analyzer)
@@ -41,6 +42,9 @@ class SpikeInterfaceSessionMerger:
         self.analyzer = self.analyzers[0]
         self.match_threshold = match_threshold
         self.censored_period_ms = censored_period_ms
+        if merging_mode not in {"soft", "hard"}:
+            raise ValueError("merging_mode must be either 'soft' or 'hard'.")
+        self.merging_mode = merging_mode
         self.output_prob_matrix = None
         self.merge_groups = []
         self.decisions = {}
@@ -293,7 +297,7 @@ class SpikeInterfaceSessionMerger:
         return review
 
     def apply_merges(self):
-        """Soft-merge approved groups after every proposal is reviewed."""
+        """Merge approved groups after every proposal is reviewed."""
         if self.undecided_groups:
             raise RuntimeError(
                 "Approve or reject every proposed merge before applying: "
@@ -343,10 +347,18 @@ class SpikeInterfaceSessionMerger:
                 )
 
         if self.approved_groups:
+            if (
+                self.merging_mode == "hard"
+                and getattr(combined_analyzer, "recording", None) is None
+            ):
+                raise RuntimeError(
+                    "Hard merging requires access to the recording traces. "
+                    "Use merging_mode='soft' for a recordingless analyzer."
+                )
             self.merged_analyzer = combined_analyzer.merge_units(
                 merge_unit_groups=self.approved_groups,
                 censored_period_ms=self.censored_period_ms,
-                merging_mode="soft",
+                merging_mode=self.merging_mode,
             )
         else:
             self.merged_analyzer = combined_analyzer
