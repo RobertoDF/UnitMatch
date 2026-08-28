@@ -451,7 +451,10 @@ class SpikeInterfaceSessionMerger:
 
         def record(approved):
             self._set_decision(tuple(current_group()), approved)
-            render_candidate()
+            if navigator.value < navigator.max:
+                navigator.value += 1
+            else:
+                render_candidate()
 
         approve_button.on_click(lambda _: record(True))
         reject_button.on_click(lambda _: record(False))
