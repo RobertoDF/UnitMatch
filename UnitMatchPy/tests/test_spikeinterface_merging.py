@@ -7,6 +7,7 @@ class _Analyzer:
     unit_ids = np.array([10, 11, 12])
     sampling_frequency = 30_000
     recording = "recording"
+    sparsity = None
 
     def __init__(self, unit_ids=None):
         if unit_ids is not None:
@@ -29,6 +30,14 @@ class _Analyzer:
     def get_channel_locations():
         return np.array([[0, 0], [0, 20]])
 
+    @staticmethod
+    def get_num_channels():
+        return 2
+
+    def get_extension(self, name):
+        assert name == "waveforms"
+        return _Waveforms()
+
     def merge_units(self, **kwargs):
         self.merge_kwargs = kwargs
         return "merged"
@@ -40,6 +49,21 @@ class _Sorting:
 
     def select_units(self, unit_ids):
         return tuple(unit_ids)
+
+
+class _Waveforms:
+    def __init__(self):
+        self.params = {"ms_before": 1.0, "ms_after": 1.0}
+
+    @staticmethod
+    def get_waveforms_one_unit(unit_id):
+        del unit_id
+        return np.array(
+            [
+                [[0.0, 0.0], [-2.0, -1.0], [0.0, 0.0]],
+                [[0.0, 0.0], [-4.0, -2.0], [0.0, 0.0]],
+            ]
+        )
 
 
 def test_apply_requires_all_proposals_reviewed():
@@ -80,6 +104,19 @@ def test_apply_forwards_hard_merging_mode():
 def test_rejects_unknown_merging_mode():
     with pytest.raises(ValueError, match="either 'soft' or 'hard'"):
         SpikeInterfaceSessionMerger(_Analyzer(), merging_mode="automatic")
+
+
+def test_unit_diagnostics_include_waveform_and_peak_location():
+    merger = SpikeInterfaceSessionMerger(_Analyzer())
+
+    times_ms, waveform, peak_location, channel_locations = (
+        merger._get_unit_diagnostics(10)
+    )
+
+    np.testing.assert_allclose(times_ms, [-1.0, -0.96666667, -0.93333333])
+    np.testing.assert_allclose(waveform, [0.0, -3.0, 0.0])
+    np.testing.assert_array_equal(peak_location, [0, 0])
+    np.testing.assert_array_equal(channel_locations, [[0, 0], [0, 20]])
 
 
 def test_save_requires_applied_analyzer(tmp_path):

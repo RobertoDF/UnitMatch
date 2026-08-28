@@ -238,8 +238,101 @@ class SpikeInterfaceSessionMerger:
             if decision is None
         ]
 
-    def display_review(self):
-        """Display Approve/Reject controls in a Jupyter notebook."""
+    def _get_unit_diagnostics(self, unit_id):
+        analyzer = self._unit_sources[unit_id]
+        waveforms_extension = analyzer.get_extension("waveforms")
+        waveforms = waveforms_extension.get_waveforms_one_unit(unit_id=unit_id)
+        mean_waveforms = np.mean(waveforms, axis=0)
+
+        if analyzer.sparsity is None:
+            channel_indices = np.arange(analyzer.get_num_channels())
+        else:
+            channel_indices = analyzer.sparsity.unit_id_to_channel_indices[unit_id]
+        mean_waveforms = mean_waveforms[:, : channel_indices.size]
+        peak_channel_index = np.argmax(np.max(np.abs(mean_waveforms), axis=0))
+
+        ms_before = waveforms_extension.params["ms_before"]
+        times_ms = (
+            np.arange(mean_waveforms.shape[0]) / analyzer.sampling_frequency * 1000
+            - ms_before
+        )
+        channel_locations = analyzer.get_channel_locations()
+        peak_location = channel_locations[channel_indices[peak_channel_index]]
+        return (
+            times_ms,
+            mean_waveforms[:, peak_channel_index],
+            peak_location,
+            channel_locations,
+        )
+
+    @staticmethod
+    def _probe_plot_axes(channel_locations):
+        coordinate_ranges = np.ptp(channel_locations, axis=0)
+        depth_axis = int(np.argmax(coordinate_ranges))
+        remaining_axes = [
+            axis for axis in range(channel_locations.shape[1]) if axis != depth_axis
+        ]
+        horizontal_axis = (
+            max(remaining_axes, key=lambda axis: coordinate_ranges[axis])
+            if remaining_axes
+            else depth_axis
+        )
+        return horizontal_axis, depth_axis
+
+    def _make_group_figure(self, group):
+        import matplotlib.pyplot as plt
+
+        colors = ("tab:blue", "tab:orange")
+        diagnostics = [
+            self._get_unit_diagnostics(unit_id) for unit_id in group
+        ]
+        figure, (waveform_axis, probe_axis) = plt.subplots(
+            1, 2, figsize=(8, 3), constrained_layout=True
+        )
+
+        for unit_id, color, diagnostic in zip(group, colors, diagnostics):
+            times_ms, waveform, _, _ = diagnostic
+            waveform_axis.plot(
+                times_ms, waveform, color=color, label=f"Unit {unit_id}"
+            )
+        waveform_axis.axvline(0, color="0.7", linewidth=0.8)
+        waveform_axis.set(
+            title="Mean waveform on peak channel",
+            xlabel="Time (ms)",
+            ylabel="Amplitude",
+        )
+        waveform_axis.legend()
+
+        channel_locations = diagnostics[0][3]
+        horizontal_axis, depth_axis = self._probe_plot_axes(channel_locations)
+        probe_axis.scatter(
+            channel_locations[:, horizontal_axis],
+            channel_locations[:, depth_axis],
+            color="0.75",
+            s=18,
+            label="Channels",
+        )
+        for unit_id, color, diagnostic in zip(group, colors, diagnostics):
+            peak_location = diagnostic[2]
+            probe_axis.scatter(
+                peak_location[horizontal_axis],
+                peak_location[depth_axis],
+                color=color,
+                edgecolor="black",
+                s=80,
+                label=f"Unit {unit_id} peak",
+                zorder=3,
+            )
+        probe_axis.set(
+            title="Peak location on probe",
+            xlabel=f"Coordinate {horizontal_axis} (um)",
+            ylabel=f"Coordinate {depth_axis} (um)",
+        )
+        probe_axis.legend(fontsize="small")
+        return figure
+
+    def display_review(self, show_diagnostics=True):
+        """Display candidate diagnostics and Approve/Reject controls."""
         try:
             import ipywidgets as widgets
             from IPython.display import display
@@ -258,41 +351,79 @@ class SpikeInterfaceSessionMerger:
             unit_id: index
             for index, unit_id in enumerate(self.unit_ids.tolist())
         }
-        rows = []
-        for group in self.merge_groups:
-            group_key = tuple(group)
+        navigator = widgets.IntSlider(
+            value=1,
+            min=1,
+            max=len(self.merge_groups),
+            step=1,
+            description="Pair",
+            continuous_update=False,
+            readout_format="d",
+            layout=widgets.Layout(width="500px"),
+        )
+        instructions = widgets.HTML(
+            value=(
+                "Click the pair slider, then use the keyboard "
+                "<b>left/right arrow keys</b> to move between candidates."
+            )
+        )
+        label = widgets.HTML(layout=widgets.Layout(width="500px"))
+        approve_button = widgets.Button(
+            description="Approve", button_style="success"
+        )
+        reject_button = widgets.Button(
+            description="Reject", button_style="danger"
+        )
+        status = widgets.HTML()
+        plot_output = widgets.Output()
+
+        def current_group():
+            return self.merge_groups[navigator.value - 1]
+
+        def render_candidate(*_):
+            group = current_group()
             unit_a, unit_b = (unit_index[unit_id] for unit_id in group)
             probability_12 = self.output_prob_matrix[unit_a, unit_b]
             probability_21 = self.output_prob_matrix[unit_b, unit_a]
-            label = widgets.HTML(
-                value=(
-                    f"<b>Units {group[0]} + {group[1]}</b> &nbsp; "
-                    f"CV12={probability_12:.3f}, CV21={probability_21:.3f}, "
-                    f"mean={(probability_12 + probability_21) / 2:.3f}"
-                ),
-                layout=widgets.Layout(width="500px"),
-            )
-            approve_button = widgets.Button(
-                description="Approve", button_style="success"
-            )
-            reject_button = widgets.Button(
-                description="Reject", button_style="danger"
-            )
-            status = widgets.HTML(value="<b>UNDECIDED</b>")
-
-            def record(approved, group_key=group_key, status=status):
-                self._set_decision(group_key, approved)
-                decision = "APPROVED" if approved else "REJECTED"
-                color = "green" if approved else "firebrick"
-                status.value = f"<b style='color:{color}'>{decision}</b>"
-
-            approve_button.on_click(lambda _, record=record: record(True))
-            reject_button.on_click(lambda _, record=record: record(False))
-            rows.append(
-                widgets.HBox([label, approve_button, reject_button, status])
+            label.value = (
+                f"<b>Units {group[0]} + {group[1]}</b> &nbsp; "
+                f"CV12={probability_12:.3f}, CV21={probability_21:.3f}, "
+                f"mean={(probability_12 + probability_21) / 2:.3f}"
             )
 
-        review = widgets.VBox(rows)
+            decision = self.decisions[tuple(group)]
+            if decision is None:
+                status.value = "<b>UNDECIDED</b>"
+            else:
+                text = "APPROVED" if decision else "REJECTED"
+                color = "green" if decision else "firebrick"
+                status.value = f"<b style='color:{color}'>{text}</b>"
+
+            plot_output.clear_output(wait=True)
+            if show_diagnostics:
+                import matplotlib.pyplot as plt
+
+                with plot_output:
+                    figure = self._make_group_figure(group)
+                    display(figure)
+                    plt.close(figure)
+
+        def record(approved):
+            self._set_decision(tuple(current_group()), approved)
+            render_candidate()
+
+        approve_button.on_click(lambda _: record(True))
+        reject_button.on_click(lambda _: record(False))
+        navigator.observe(render_candidate, names="value")
+
+        controls = widgets.HBox(
+            [label, approve_button, reject_button, status]
+        )
+        children = [instructions, navigator, controls]
+        if show_diagnostics:
+            children.append(plot_output)
+        review = widgets.VBox(children)
+        render_candidate()
         display(review)
         return review
 
