@@ -586,12 +586,33 @@ class SpikeInterfaceSessionMerger:
                     "Unsupported SpikeInterface merge_units() signature: "
                     "missing censor_ms/censored_period_ms."
                 )
-            self.merged_analyzer = combined_analyzer.merge_units(
+            self.merged_analyzer, merged_unit_ids = combined_analyzer.merge_units(
                 merge_unit_groups=self.approved_groups,
                 merging_mode=self.merging_mode,
+                return_new_unit_ids=True,
                 **censor_argument,
                 **job_kwargs,
             )
+            merged_source_ids = {
+                unit_id
+                for group in self.approved_groups
+                for unit_id in group
+            }
+            expected_unit_ids = (
+                set(combined_analyzer.unit_ids.tolist())
+                - merged_source_ids
+            ) | set(merged_unit_ids)
+            actual_unit_ids = set(self.merged_analyzer.unit_ids.tolist())
+            assert actual_unit_ids == expected_unit_ids, (
+                "Merged analyzer has unexpected units: "
+                f"expected {sorted(expected_unit_ids)}, "
+                f"got {sorted(actual_unit_ids)}"
+            )
+            for group, merged_unit_id in zip(
+                self.approved_groups, merged_unit_ids
+            ):
+                source_ids = ",".join(str(unit_id) for unit_id in group)
+                print(f"{source_ids} -> {merged_unit_id}")
         else:
             self.merged_analyzer = combined_analyzer
         return self.merged_analyzer

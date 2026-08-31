@@ -45,13 +45,32 @@ class _Analyzer:
             return _RandomSpikes()
         raise AssertionError(name)
 
-    def merge_units(self, merge_unit_groups, censor_ms, merging_mode):
+    def merge_units(
+        self,
+        merge_unit_groups,
+        censor_ms,
+        merging_mode,
+        return_new_unit_ids,
+    ):
         self.merge_kwargs = {
             "merge_unit_groups": merge_unit_groups,
             "censor_ms": censor_ms,
             "merging_mode": merging_mode,
+            "return_new_unit_ids": return_new_unit_ids,
         }
-        return "merged"
+        merged_source_ids = {
+            unit_id for group in merge_unit_groups for unit_id in group
+        }
+        remaining_ids = [
+            unit_id
+            for unit_id in self.unit_ids
+            if unit_id not in merged_source_ids
+        ]
+        new_unit_ids = [
+            max(self.unit_ids) + index + 1
+            for index in range(len(merge_unit_groups))
+        ]
+        return _Analyzer(remaining_ids + new_unit_ids), new_unit_ids
 
 
 class _Sorting:
@@ -98,7 +117,7 @@ def test_apply_requires_all_proposals_reviewed():
         merger.apply_merges()
 
 
-def test_apply_soft_merges_only_approved_groups():
+def test_apply_soft_merges_only_approved_groups(capsys):
     analyzer = _Analyzer()
     merger = SpikeInterfaceSessionMerger(analyzer, censored_period_ms=0.75)
     merger.merge_groups = [[10, 11], [12, 13]]
@@ -106,12 +125,14 @@ def test_apply_soft_merges_only_approved_groups():
 
     result = merger.apply_merges()
 
-    assert result == "merged"
+    assert result.unit_ids.tolist() == [12, 13]
     assert analyzer.merge_kwargs == {
         "merge_unit_groups": [[10, 11]],
         "censor_ms": 0.75,
         "merging_mode": "soft",
+        "return_new_unit_ids": True,
     }
+    assert capsys.readouterr().out == "10,11 -> 13\n"
 
 
 def test_apply_forwards_hard_merging_mode():
@@ -231,12 +252,23 @@ def test_replaced_source_units_are_not_selected(monkeypatch):
         return "combined-sorting"
 
     class _CombinedAnalyzer:
-        def merge_units(self, merge_unit_groups, censor_ms, merging_mode):
-            return {
+        unit_ids = np.array([3, 4])
+
+        def merge_units(
+            self,
+            merge_unit_groups,
+            censor_ms,
+            merging_mode,
+            return_new_unit_ids,
+        ):
+            self.merge_kwargs = {
                 "merge_unit_groups": merge_unit_groups,
                 "censor_ms": censor_ms,
                 "merging_mode": merging_mode,
+                "return_new_unit_ids": return_new_unit_ids,
             }
+            merged = _Analyzer([5])
+            return merged, [5]
 
     def create_sorting_analyzer(**kwargs):
         assert kwargs["sorting"] == "combined-sorting"
@@ -262,4 +294,4 @@ def test_replaced_source_units_are_not_selected(monkeypatch):
     result = merger.apply_merges()
 
     assert aggregate_calls == [([(3,), (4,)], [3, 4])]
-    assert result["merge_unit_groups"] == [[3, 4]]
+    assert result.unit_ids.tolist() == [5]
