@@ -291,12 +291,11 @@ class SpikeInterfaceSessionMerger:
                 f"Unit {unit_id} has {selected_spike_indices.size} selected spikes "
                 f"but {waveforms.shape[0]} stored waveforms."
             )
-        spike_times_s = (
-            analyzer.sorting.get_unit_spike_train(unit_id=unit_id)[
-                selected_spike_indices
-            ]
+        all_spike_times_s = (
+            analyzer.sorting.get_unit_spike_train(unit_id=unit_id)
             / analyzer.sampling_frequency
         )
+        spike_times_s = all_spike_times_s[selected_spike_indices]
         spike_amplitudes = waveforms[
             :, peak_sample_index, peak_channel_index
         ]
@@ -307,6 +306,7 @@ class SpikeInterfaceSessionMerger:
             channel_locations,
             spike_times_s,
             spike_amplitudes,
+            all_spike_times_s,
         )
 
     def _make_group_figure(self, group):
@@ -316,8 +316,13 @@ class SpikeInterfaceSessionMerger:
         diagnostics = [
             self._get_unit_diagnostics(unit_id) for unit_id in group
         ]
-        figure, (waveform_axis, probe_axis, amplitude_axis) = plt.subplots(
-            1, 3, figsize=(12, 3), constrained_layout=True
+        figure, (
+            waveform_axis,
+            probe_axis,
+            amplitude_axis,
+            rate_axis,
+        ) = plt.subplots(
+            1, 4, figsize=(16, 3), constrained_layout=True
         )
 
         for unit_id, color, diagnostic in zip(group, colors, diagnostics):
@@ -377,6 +382,33 @@ class SpikeInterfaceSessionMerger:
             ylabel="Signed peak amplitude",
         )
         amplitude_axis.legend(fontsize="small")
+
+        duration_s = max(
+            analyzer.get_num_samples() / analyzer.sampling_frequency
+            for analyzer in (
+                self._unit_sources[unit_id] for unit_id in group
+            )
+        )
+        bin_width_s = min(10.0, max(0.1, duration_s / 20))
+        bin_edges = np.arange(0, duration_s, bin_width_s)
+        bin_edges = np.append(bin_edges, duration_s)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        bin_widths = np.diff(bin_edges)
+        for unit_id, color, diagnostic in zip(group, colors, diagnostics):
+            spike_counts, _ = np.histogram(diagnostic[6], bins=bin_edges)
+            firing_rates = spike_counts / bin_widths
+            rate_axis.plot(
+                bin_centers,
+                firing_rates,
+                color=color,
+                label=f"Unit {unit_id}",
+            )
+        rate_axis.set(
+            title="Spike rate over time",
+            xlabel="Time (s)",
+            ylabel="Firing rate (Hz)",
+        )
+        rate_axis.legend(fontsize="small")
         return figure
 
     def display_review(self, show_diagnostics=True):

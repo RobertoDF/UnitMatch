@@ -139,6 +139,7 @@ def test_unit_diagnostics_include_waveform_and_peak_location():
         channel_locations,
         spike_times_s,
         spike_amplitudes,
+        all_spike_times_s,
     ) = (
         merger._get_unit_diagnostics(10)
     )
@@ -149,6 +150,7 @@ def test_unit_diagnostics_include_waveform_and_peak_location():
     np.testing.assert_array_equal(channel_locations, [[0, 0], [0, 20]])
     np.testing.assert_array_equal(spike_times_s, [0.0, 2.0])
     np.testing.assert_array_equal(spike_amplitudes, [-2.0, -4.0])
+    np.testing.assert_array_equal(all_spike_times_s, [0.0, 1.0, 2.0])
 
 
 def test_group_figure_renders_waveforms_and_probe_locations():
@@ -156,10 +158,11 @@ def test_group_figure_renders_waveforms_and_probe_locations():
 
     figure = merger._make_group_figure([10, 11])
 
-    assert len(figure.axes) == 3
+    assert len(figure.axes) == 4
     assert figure.axes[0].get_title() == "Mean waveform on peak channel"
     assert figure.axes[1].get_title() == "Peak location on probe"
     assert figure.axes[2].get_title() == "Spike amplitudes over time"
+    assert figure.axes[3].get_title() == "Spike rate over time"
 
 
 def test_save_requires_applied_analyzer(tmp_path):
