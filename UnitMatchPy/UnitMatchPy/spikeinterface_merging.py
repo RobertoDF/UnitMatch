@@ -572,3 +572,13 @@ class SpikeInterfaceSessionMerger:
                 )
             shutil.rmtree(folder)
         return self.merged_analyzer.save_as(folder=folder, format=format)
+
+    def apply_and_save(
+        self,
+        folder,
+        format="binary_folder",
+        overwrite=False,
+    ):
+        """Apply reviewed merges and persist the resulting analyzer."""
+        self.apply_merges()
+        return self.save(folder, format=format, overwrite=overwrite)

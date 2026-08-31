@@ -169,6 +169,32 @@ def test_save_requires_applied_analyzer(tmp_path):
         merger.save(tmp_path / "merged")
 
 
+def test_apply_and_save_runs_both_steps(monkeypatch, tmp_path):
+    merger = SpikeInterfaceSessionMerger(_Analyzer())
+    calls = []
+
+    monkeypatch.setattr(
+        merger,
+        "apply_merges",
+        lambda: calls.append("apply"),
+    )
+
+    def save(folder, format, overwrite):
+        calls.append((folder, format, overwrite))
+        return "saved"
+
+    monkeypatch.setattr(merger, "save", save)
+    output_path = tmp_path / "merged"
+
+    result = merger.apply_and_save(output_path, overwrite=True)
+
+    assert result == "saved"
+    assert calls == [
+        "apply",
+        (output_path, "binary_folder", True),
+    ]
+
+
 def test_multiple_analyzers_require_final_metric_unit_ids():
     with pytest.raises(ValueError, match="metrics.index"):
         SpikeInterfaceSessionMerger([_Analyzer([1, 2]), _Analyzer([3])])
