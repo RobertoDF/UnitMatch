@@ -68,6 +68,7 @@ class SpikeInterfaceSessionMerger:
         self.merge_groups = []
         self.decisions = {}
         self.merged_analyzer = None
+        self.merged_unit_ids = []
         self._validate_analyzer()
 
     def _normalize_unit_ids(self, unit_ids):
@@ -642,6 +643,7 @@ class SpikeInterfaceSessionMerger:
                 **censor_argument,
                 **job_kwargs,
             )
+            self.merged_unit_ids = list(merged_unit_ids)
             merged_source_ids = {
                 unit_id
                 for group in self.approved_groups
@@ -664,6 +666,7 @@ class SpikeInterfaceSessionMerger:
                 print(f"{source_ids} -> {merged_unit_id}")
         else:
             self.merged_analyzer = combined_analyzer
+            self.merged_unit_ids = []
         return self.merged_analyzer
 
     def save(self, folder, format="binary_folder", overwrite=False):

@@ -124,6 +124,7 @@ def test_apply_soft_merges_only_approved_groups(capsys):
     result = merger.apply_merges()
 
     assert result.unit_ids.tolist() == [12, 13]
+    assert merger.merged_unit_ids == [13]
     assert analyzer.merge_kwargs == {
         "merge_unit_groups": [[10, 11]],
         "new_unit_ids": [13],
