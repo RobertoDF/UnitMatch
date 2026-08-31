@@ -179,14 +179,7 @@ def test_apply_and_save_runs_both_steps(monkeypatch, tmp_path):
     monkeypatch.setattr(
         merger,
         "apply_merges",
-        lambda: calls.append("apply"),
-    )
-    monkeypatch.setattr(
-        merger,
-        "prepare_for_unitmatch",
-        lambda channel_radius, job_kwargs: calls.append(
-            ("prepare", channel_radius, job_kwargs)
-        ),
+        lambda job_kwargs: calls.append(("apply", job_kwargs)),
     )
 
     def save(folder, format, overwrite):
@@ -196,73 +189,17 @@ def test_apply_and_save_runs_both_steps(monkeypatch, tmp_path):
     monkeypatch.setattr(merger, "save", save)
     output_path = tmp_path / "merged"
 
-    result = merger.apply_and_save(output_path, overwrite=True)
-
-    assert result == "saved"
-    assert calls == [
-        "apply",
-        ("prepare", None, None),
-        (output_path, "binary_folder", True),
-    ]
-
-
-def test_prepare_for_unitmatch_rebuilds_sparse_analyzer(monkeypatch):
-    merger = SpikeInterfaceSessionMerger(_Analyzer())
-    merged_analyzer = _Analyzer()
-    merged_analyzer.sorting = "merged-sorting"
-    merger.merged_analyzer = merged_analyzer
-    create_calls = []
-
-    class _PreparedAnalyzer:
-        def compute(self, extensions, **kwargs):
-            self.compute_call = (extensions, kwargs)
-
-    prepared_analyzer = _PreparedAnalyzer()
-
-    def create_sorting_analyzer(**kwargs):
-        create_calls.append(kwargs)
-        return prepared_analyzer
-
-    import sys
-    import types
-
-    monkeypatch.setitem(
-        sys.modules,
-        "spikeinterface",
-        types.SimpleNamespace(create_sorting_analyzer=create_sorting_analyzer),
-    )
-
-    result = merger.prepare_for_unitmatch(
-        channel_radius=75,
+    result = merger.apply_and_save(
+        output_path,
+        overwrite=True,
         job_kwargs={"n_jobs": 2},
     )
 
-    assert result is prepared_analyzer
-    assert create_calls == [
-        {
-            "sorting": "merged-sorting",
-            "recording": "recording",
-            "format": "memory",
-            "sparse": True,
-            "method": "radius",
-            "radius_um": 75,
-            "n_jobs": 2,
-        }
+    assert result == "saved"
+    assert calls == [
+        ("apply", {"n_jobs": 2}),
+        (output_path, "binary_folder", True),
     ]
-    assert prepared_analyzer.compute_call == (
-        ["random_spikes", "waveforms"],
-        {"n_jobs": 2},
-    )
-    assert merger.merged_analyzer is prepared_analyzer
-
-
-def test_prepare_for_unitmatch_requires_recording():
-    merger = SpikeInterfaceSessionMerger(_Analyzer())
-    merger.merged_analyzer = _Analyzer()
-    merger.merged_analyzer.recording = None
-
-    with pytest.raises(RuntimeError, match="requires recording traces"):
-        merger.prepare_for_unitmatch()
 
 
 def test_multiple_analyzers_require_final_metric_unit_ids():
