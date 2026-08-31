@@ -401,6 +401,7 @@ class SpikeInterfaceSessionMerger:
                 bin_centers,
                 firing_rates,
                 color=color,
+                alpha=0.5,
                 label=f"Unit {unit_id}",
             )
         rate_axis.set(
