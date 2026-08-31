@@ -15,6 +15,20 @@ from .default_params import get_default_param
 from .save_utils import make_UnitMatch_folder_from_sorting_analyzers
 
 
+def _probe_plot_axes(channel_locations):
+    coordinate_ranges = np.ptp(channel_locations, axis=0)
+    depth_axis = int(np.argmax(coordinate_ranges))
+    remaining_axes = [
+        axis for axis in range(channel_locations.shape[1]) if axis != depth_axis
+    ]
+    horizontal_axis = (
+        max(remaining_axes, key=lambda axis: coordinate_ranges[axis])
+        if remaining_axes
+        else depth_axis
+    )
+    return horizontal_axis, depth_axis
+
+
 class SpikeInterfaceSessionMerger:
     """Review and soft-merge likely over-split units in one logical session.
 
@@ -295,19 +309,6 @@ class SpikeInterfaceSessionMerger:
             spike_amplitudes,
         )
 
-    def _probe_plot_axes(self, channel_locations):
-        coordinate_ranges = np.ptp(channel_locations, axis=0)
-        depth_axis = int(np.argmax(coordinate_ranges))
-        remaining_axes = [
-            axis for axis in range(channel_locations.shape[1]) if axis != depth_axis
-        ]
-        horizontal_axis = (
-            max(remaining_axes, key=lambda axis: coordinate_ranges[axis])
-            if remaining_axes
-            else depth_axis
-        )
-        return horizontal_axis, depth_axis
-
     def _make_group_figure(self, group):
         import matplotlib.pyplot as plt
 
@@ -333,7 +334,7 @@ class SpikeInterfaceSessionMerger:
         waveform_axis.legend()
 
         channel_locations = diagnostics[0][3]
-        horizontal_axis, depth_axis = self._probe_plot_axes(channel_locations)
+        horizontal_axis, depth_axis = _probe_plot_axes(channel_locations)
         probe_axis.scatter(
             channel_locations[:, horizontal_axis],
             channel_locations[:, depth_axis],
