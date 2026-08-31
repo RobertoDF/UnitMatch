@@ -133,6 +133,51 @@ class SpikeInterfaceSessionMerger:
             ):
                 raise ValueError("All analyzers must use the same channel geometry.")
 
+    @staticmethod
+    def _generate_safe_merge_unit_ids(analyzer, num_merges):
+        visible_unit_ids = np.asarray(analyzer.unit_ids)
+        occupied_unit_ids = visible_unit_ids
+        get_provenance = getattr(analyzer, "get_sorting_provenance", None)
+        if get_provenance is not None:
+            provenance = get_provenance()
+            if provenance is not None:
+                occupied_unit_ids = np.concatenate(
+                    [occupied_unit_ids, np.asarray(provenance.unit_ids)]
+                )
+
+        occupied = set(occupied_unit_ids.tolist())
+        new_unit_ids = []
+        if np.issubdtype(visible_unit_ids.dtype, np.number):
+            candidate = np.max(occupied_unit_ids) + 1
+            while len(new_unit_ids) < num_merges:
+                if candidate not in occupied:
+                    new_unit_ids.append(candidate)
+                    occupied.add(candidate)
+                candidate += 1
+            return np.asarray(
+                new_unit_ids, dtype=visible_unit_ids.dtype
+            ).tolist()
+
+        occupied_strings = {str(unit_id) for unit_id in occupied}
+        if all(unit_id.isdigit() for unit_id in occupied_strings):
+            candidate = max(int(unit_id) for unit_id in occupied_strings) + 1
+            while len(new_unit_ids) < num_merges:
+                candidate_id = str(candidate)
+                if candidate_id not in occupied_strings:
+                    new_unit_ids.append(candidate_id)
+                    occupied_strings.add(candidate_id)
+                candidate += 1
+        else:
+            candidate_index = 0
+            while len(new_unit_ids) < num_merges:
+                candidate = f"unitmatch_merge_{candidate_index}"
+                if candidate not in occupied_strings:
+                    new_unit_ids.append(candidate)
+                    occupied_strings.add(candidate)
+                candidate_index += 1
+
+        return new_unit_ids
+
     def _export_composite_session(self, export_dir):
         source_dir = export_dir / "sources"
         make_UnitMatch_folder_from_sorting_analyzers(
@@ -586,8 +631,12 @@ class SpikeInterfaceSessionMerger:
                     "Unsupported SpikeInterface merge_units() signature: "
                     "missing censor_ms/censored_period_ms."
                 )
+            new_unit_ids = self._generate_safe_merge_unit_ids(
+                combined_analyzer, len(self.approved_groups)
+            )
             self.merged_analyzer, merged_unit_ids = combined_analyzer.merge_units(
                 merge_unit_groups=self.approved_groups,
+                new_unit_ids=new_unit_ids,
                 merging_mode=self.merging_mode,
                 return_new_unit_ids=True,
                 **censor_argument,
