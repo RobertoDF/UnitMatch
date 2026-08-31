@@ -336,6 +336,7 @@ class SpikeInterfaceSessionMerger:
 
     def _make_group_figure(self, group):
         import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
 
         colors = ("tab:blue", "tab:orange")
         diagnostics = [
@@ -350,10 +351,8 @@ class SpikeInterfaceSessionMerger:
             1, 4, figsize=(16, 3), constrained_layout=True
         )
 
-        for unit_index, (unit_id, color, diagnostic) in enumerate(
-            zip(group, colors, diagnostics)
-        ):
-            for peak_owner_index, peak_owner_id in enumerate(group):
+        for unit_id, color, diagnostic in zip(group, colors, diagnostics):
+            for peak_owner_index in range(len(group)):
                 peak_channel_index = diagnostics[
                     peak_owner_index
                 ].peak_channel_index
@@ -361,10 +360,7 @@ class SpikeInterfaceSessionMerger:
                     diagnostic.times_ms,
                     diagnostic.waveform_on_channel(peak_channel_index),
                     color=color,
-                    linestyle="-" if unit_index == peak_owner_index else "--",
-                    label=(
-                        f"Unit {unit_id} on unit {peak_owner_id} peak channel"
-                    ),
+                    linestyle="-" if peak_owner_index == 0 else "--",
                 )
         waveform_axis.axvline(0, color="0.7", linewidth=0.8)
         waveform_axis.set(
@@ -372,7 +368,33 @@ class SpikeInterfaceSessionMerger:
             xlabel="Time (ms)",
             ylabel="Amplitude",
         )
-        waveform_axis.legend(fontsize="small")
+        legend_handles = [
+            Line2D([], [], color=color, label=f"Unit {unit_id}")
+            for unit_id, color in zip(group, colors)
+        ]
+        legend_handles.extend(
+            [
+                Line2D(
+                    [],
+                    [],
+                    color="0.25",
+                    linestyle="-" if peak_owner_index == 0 else "--",
+                    label=f"Peak: unit {peak_owner_id}",
+                )
+                for peak_owner_index, peak_owner_id in enumerate(group)
+            ]
+        )
+        waveform_axis.legend(
+            handles=legend_handles,
+            loc="upper left",
+            bbox_to_anchor=(1.0, 1.0),
+            fontsize="x-small",
+            handlelength=1.2,
+            handletextpad=0.4,
+            labelspacing=0.2,
+            borderpad=0.25,
+            borderaxespad=0.2,
+        )
 
         channel_locations = diagnostics[0].channel_locations
         horizontal_axis, depth_axis = _probe_plot_axes(channel_locations)

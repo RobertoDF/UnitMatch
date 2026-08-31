@@ -245,12 +245,6 @@ def test_group_figure_maps_both_sparse_peak_channels():
     figure = merger._make_group_figure([10, 11])
 
     waveform_lines = figure.axes[0].lines[:4]
-    assert [line.get_label() for line in waveform_lines] == [
-        "Unit 10 on unit 10 peak channel",
-        "Unit 10 on unit 11 peak channel",
-        "Unit 11 on unit 10 peak channel",
-        "Unit 11 on unit 11 peak channel",
-    ]
     assert [line.get_color() for line in waveform_lines] == [
         "tab:blue",
         "tab:blue",
@@ -260,13 +254,23 @@ def test_group_figure_maps_both_sparse_peak_channels():
     assert [line.get_linestyle() for line in waveform_lines] == [
         "-",
         "--",
-        "--",
         "-",
+        "--",
     ]
     np.testing.assert_array_equal(
         [line.get_ydata()[1] for line in waveform_lines],
         [-10.0, -4.0, -5.0, -12.0],
     )
+    legend = figure.axes[0].get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == [
+        "Unit 10",
+        "Unit 11",
+        "Peak: unit 10",
+        "Peak: unit 11",
+    ]
+    assert max(text.get_fontsize() for text in legend.get_texts()) <= 8
+    assert legend.handlelength == 1.2
+    assert legend.labelspacing == 0.2
 
 
 def test_save_requires_applied_analyzer(tmp_path):
