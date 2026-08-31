@@ -606,12 +606,51 @@ class SpikeInterfaceSessionMerger:
             shutil.rmtree(folder)
         return self.merged_analyzer.save_as(folder=folder, format=format)
 
+    def prepare_for_unitmatch(self, channel_radius=None, job_kwargs=None):
+        """Rebuild the merged analyzer with the data required by UnitMatch."""
+        if self.merged_analyzer is None:
+            raise RuntimeError("Call apply_merges() before preparing the analyzer.")
+
+        recording = getattr(self.merged_analyzer, "recording", None)
+        if recording is None:
+            raise RuntimeError(
+                "Preparing a merged analyzer for UnitMatch requires recording traces."
+            )
+
+        if channel_radius is None:
+            channel_radius = get_default_param()["channel_radius"]
+        if job_kwargs is None:
+            job_kwargs = {}
+
+        from spikeinterface import create_sorting_analyzer
+
+        self.merged_analyzer = create_sorting_analyzer(
+            sorting=self.merged_analyzer.sorting,
+            recording=recording,
+            format="memory",
+            sparse=True,
+            method="radius",
+            radius_um=channel_radius,
+            **job_kwargs,
+        )
+        self.merged_analyzer.compute(
+            ["random_spikes", "waveforms"],
+            **job_kwargs,
+        )
+        return self.merged_analyzer
+
     def apply_and_save(
         self,
         folder,
         format="binary_folder",
         overwrite=False,
+        channel_radius=None,
+        job_kwargs=None,
     ):
-        """Apply reviewed merges and persist the resulting analyzer."""
+        """Apply merges, prepare for UnitMatch, and persist the analyzer."""
         self.apply_merges()
+        self.prepare_for_unitmatch(
+            channel_radius=channel_radius,
+            job_kwargs=job_kwargs,
+        )
         return self.save(folder, format=format, overwrite=overwrite)
