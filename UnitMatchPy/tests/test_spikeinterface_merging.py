@@ -48,17 +48,21 @@ class _Analyzer:
     def merge_units(
         self,
         merge_unit_groups,
-        new_unit_ids,
         censor_ms,
         merging_mode,
         return_new_unit_ids,
+        **job_kwargs,
     ):
+        new_unit_ids = [
+            int(np.max(self.unit_ids)) + index + 1
+            for index in range(len(merge_unit_groups))
+        ]
         self.merge_kwargs = {
             "merge_unit_groups": merge_unit_groups,
-            "new_unit_ids": new_unit_ids,
             "censor_ms": censor_ms,
             "merging_mode": merging_mode,
             "return_new_unit_ids": return_new_unit_ids,
+            **job_kwargs,
         }
         merged_source_ids = {
             unit_id for group in merge_unit_groups for unit_id in group
@@ -115,24 +119,35 @@ def test_apply_requires_all_proposals_reviewed():
         merger.apply_merges()
 
 
-def test_apply_soft_merges_only_approved_groups(capsys):
+def test_apply_soft_merges_only_approved_groups():
     analyzer = _Analyzer()
     merger = SpikeInterfaceSessionMerger(analyzer, censored_period_ms=0.75)
     merger.merge_groups = [[10, 11], [12, 13]]
     merger.decisions = {(10, 11): True, (12, 13): False}
 
-    result = merger.apply_merges()
+    result = merger.apply_merges(job_kwargs={"n_jobs": 2})
 
     assert result.unit_ids.tolist() == [12, 13]
     assert merger.merged_unit_ids == [13]
     assert analyzer.merge_kwargs == {
         "merge_unit_groups": [[10, 11]],
-        "new_unit_ids": [13],
         "censor_ms": 0.75,
         "merging_mode": "soft",
         "return_new_unit_ids": True,
+        "n_jobs": 2,
     }
-    assert capsys.readouterr().out == "10,11 -> 13\n"
+
+
+def test_apply_with_no_approved_groups_returns_original_analyzer():
+    analyzer = _Analyzer()
+    merger = SpikeInterfaceSessionMerger(analyzer)
+    merger.decisions = {(10, 11): False}
+
+    result = merger.apply_merges()
+
+    assert result is analyzer
+    assert merger.merged_analyzer is analyzer
+    assert merger.merged_unit_ids == []
 
 
 def test_apply_forwards_hard_merging_mode():
@@ -242,82 +257,14 @@ def test_final_metric_ids_select_complementary_analyzer_units():
     assert merger._unit_sources[4] is original
 
 
-def test_replaced_source_units_are_not_selected(monkeypatch):
+def test_apply_rejects_multiple_analyzers():
     original = _Analyzer([1, 2, 4])
     replacements = _Analyzer([3])
-    aggregate_calls = []
-
-    def aggregate_units(sortings, renamed_unit_ids):
-        aggregate_calls.append((sortings, renamed_unit_ids.tolist()))
-        return "combined-sorting"
-
-    class _CombinedAnalyzer:
-        unit_ids = np.array([3, 4])
-
-        def merge_units(
-            self,
-            merge_unit_groups,
-            new_unit_ids,
-            censor_ms,
-            merging_mode,
-            return_new_unit_ids,
-        ):
-            self.merge_kwargs = {
-                "merge_unit_groups": merge_unit_groups,
-                "new_unit_ids": new_unit_ids,
-                "censor_ms": censor_ms,
-                "merging_mode": merging_mode,
-                "return_new_unit_ids": return_new_unit_ids,
-            }
-            merged = _Analyzer(new_unit_ids)
-            return merged, new_unit_ids
-
-    def create_sorting_analyzer(**kwargs):
-        assert kwargs["sorting"] == "combined-sorting"
-        assert kwargs["recording"] == "recording"
-        return _CombinedAnalyzer()
-
-    import sys
-    import types
-
-    spikeinterface = types.SimpleNamespace(
-        SortingAnalyzer=object,
-        aggregate_units=aggregate_units,
-        create_sorting_analyzer=create_sorting_analyzer,
-    )
-    monkeypatch.setitem(sys.modules, "spikeinterface", spikeinterface)
-
     merger = SpikeInterfaceSessionMerger(
         [original, replacements],
         unit_ids=[3, 4],
     )
     merger.decisions = {(3, 4): True}
 
-    result = merger.apply_merges()
-
-    assert aggregate_calls == [([(3,), (4,)], [3, 4])]
-    assert result.unit_ids.tolist() == [5]
-
-
-def test_merge_ids_do_not_collide_with_hidden_provenance_units(capsys):
-    analyzer = _Analyzer()
-    analyzer.get_sorting_provenance = lambda: _Sorting([10, 11, 12, 13, 14])
-    merger = SpikeInterfaceSessionMerger(analyzer)
-    merger.decisions = {(10, 11): True}
-
-    result = merger.apply_merges()
-
-    assert result.unit_ids.tolist() == [12, 15]
-    assert analyzer.merge_kwargs["new_unit_ids"] == [15]
-    assert capsys.readouterr().out == "10,11 -> 15\n"
-
-
-def test_safe_merge_ids_preserve_numeric_string_ids():
-    analyzer = _Analyzer(["0", "1", "2"])
-    analyzer.get_sorting_provenance = lambda: _Sorting(["0", "1", "2", "3"])
-
-    new_unit_ids = SpikeInterfaceSessionMerger._generate_safe_merge_unit_ids(
-        analyzer, num_merges=2
-    )
-
-    assert new_unit_ids == ["4", "5"]
+    with pytest.raises(RuntimeError, match="same single analyzer"):
+        merger.apply_merges()

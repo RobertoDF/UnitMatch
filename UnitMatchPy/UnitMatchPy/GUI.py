@@ -2108,19 +2108,19 @@ def plot_trajectories(UnitA, UnitB, CV):
 
 
 def order_good_sites(good_sites, channel_pos, n_sessions):
+    good_sites = np.asarray(good_sites).reshape(-1)
     # make it so it goes from biggest to smallest
-    reordered_idx = np.argsort(-channel_pos[n_sessions][good_sites, 2].squeeze())
+    reordered_idx = np.argsort(-channel_pos[n_sessions][good_sites, 2])
     reordered_good_sites = good_sites[reordered_idx]
 
     # re-arange x-axis so it goes (smaller x, bigger x)
-    for i in range(9):
-        a, b = channel_pos[n_sessions][reordered_good_sites[[2 * i, 2 * i + 1]], 1]
+    for pair_start in range(0, len(reordered_good_sites) - 1, 2):
+        pair = [pair_start, pair_start + 1]
+        a, b = channel_pos[n_sessions][reordered_good_sites[pair], 1]
 
         if a > b:
             # swap order
-            reordered_good_sites[[2 * i + 1, 2 * i]] = reordered_good_sites[
-                [2 * i, 2 * i + 1]
-            ]
+            reordered_good_sites[pair] = reordered_good_sites[pair[::-1]]
     return reordered_good_sites
 
 
@@ -2131,7 +2131,7 @@ def nearest_channels(max_site, max_site_mean, channel_pos, clus_info, unit, CV):
         maxsite = max_site_mean[unit].squeeze()
         __, x, y = channel_pos[n_sessions][maxsite, :]
 
-        good_x_sites = np.argwhere(
+        good_x_sites = np.flatnonzero(
             np.logical_and(
                 (x - 50 < channel_pos[n_sessions][:, 1]) == True,
                 (channel_pos[n_sessions][:, 1] < x + 50) == True,
@@ -2140,15 +2140,14 @@ def nearest_channels(max_site, max_site_mean, channel_pos, clus_info, unit, CV):
         y_values = channel_pos[n_sessions][good_x_sites, 2]
 
         y_dist_to_max_site = np.abs(y_values - channel_pos[n_sessions][maxsite, 2])
-        good_sites = np.argsort(y_dist_to_max_site, axis=0)[:18]
-        good_sites = good_x_sites[good_sites]
+        good_sites = good_x_sites[np.argsort(y_dist_to_max_site)[:18]]
         reordered_good_sites = order_good_sites(good_sites, channel_pos, n_sessions)
 
     else:
         maxsite = max_site[unit, CV]
         __, x, y = channel_pos[n_sessions][maxsite, :]
 
-        good_x_sites = np.argwhere(
+        good_x_sites = np.flatnonzero(
             np.logical_and(
                 (x - 50 < channel_pos[n_sessions][:, 1]) == True,
                 (channel_pos[n_sessions][:, 1] < x + 50) == True,
@@ -2157,8 +2156,7 @@ def nearest_channels(max_site, max_site_mean, channel_pos, clus_info, unit, CV):
         y_values = channel_pos[n_sessions][good_x_sites, 2]
 
         y_dist_to_max_site = np.abs(y_values - channel_pos[n_sessions][maxsite, 2])
-        good_sites = np.argsort(y_dist_to_max_site, axis=0)[:18]
-        good_sites = good_x_sites[good_sites]
+        good_sites = good_x_sites[np.argsort(y_dist_to_max_site)[:18]]
         reordered_good_sites = order_good_sites(good_sites, channel_pos, n_sessions)
 
     return reordered_good_sites
@@ -2185,37 +2183,36 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
             max_site, max_site_mean, channel_pos, clus_info, unit_a, CV
         )
 
-        min_x, min_y = channel_pos[session_no_a][good_channels[-2], [1, 2]].squeeze()
-        max_x, maxy = channel_pos[session_no_a][good_channels[1], [1, 2]].squeeze()
-        delta_x = (max_x - min_x) / 2
-        delta_y = (maxy - min_y) / 18
-
         # may want to change so it find this for both units and selects the most extreme arguments
         # however i dont think tis will be necessary
         sub_min_y = np.nanmin(waveform[unit_a, :, good_channels].mean(axis=-1))
         sub_max_y = np.nanmax(waveform[unit_a, :, good_channels].mean(axis=-1))
-        # shift each waveform so 0 is at the channel site, 1/9 is width of a y waveform plot
-        waveform_y_offset = (
-            (np.abs(sub_max_y) / (np.abs(sub_min_y) + np.abs(sub_max_y))) * 1 / 9
-        )
 
     else:
         good_channels = nearest_channels(
             max_site, max_site_mean, channel_pos, clus_info, unit_a, CV[0]
         )
 
-        min_x, min_y = channel_pos[session_no_a][good_channels[-2], [1, 2]].squeeze()
-        max_x, maxy = channel_pos[session_no_a][good_channels[1], [1, 2]].squeeze()
-        delta_x = (max_x - min_x) / 2
-        delta_y = (maxy - min_y) / 18
         # may want to change so it find this for both units and selects the most extreme arguments
         # however i dont think this will be necessary
         sub_min_y = np.nanmin(waveform[unit_a, :, good_channels, CV[0]])
         sub_max_y = np.nanmax(waveform[unit_a, :, good_channels, CV[0]])
-        # shift each waveform so 0 is at the channel site, 1/9 is width of a y waveform plot
-        waveform_y_offset = (
-            (np.abs(sub_max_y) / (np.abs(sub_min_y) + np.abs(sub_max_y))) * 1 / 9
-        )
+
+    good_channels = np.asarray(good_channels).reshape(-1)
+    num_rows = int(np.ceil(len(good_channels) / 2))
+    selected_positions = channel_pos[session_no_a][good_channels][:, [1, 2]]
+    min_x, min_y = np.min(selected_positions, axis=0)
+    max_x, max_y = np.max(selected_positions, axis=0)
+    x_range = max_x - min_x
+    y_range = max_y - min_y
+    delta_x = x_range / 2 if x_range > 0 else 1
+    delta_y = y_range / len(good_channels) if y_range > 0 else 1
+    amplitude_range = np.abs(sub_min_y) + np.abs(sub_max_y)
+    waveform_y_offset = (
+        np.abs(sub_max_y) / amplitude_range / num_rows
+        if amplitude_range > 0
+        else 0
+    )
 
     # make the main scatter positiose site as scatter with opacity
     main_ax.scatter(
@@ -2225,62 +2222,58 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
         alpha=0.3,
     )
     main_ax.set_xlim(min_x - delta_x, max_x + delta_x)
-    main_ax.set_ylim(min_y - delta_y, maxy + delta_y)
+    main_ax.set_ylim(min_y - delta_y, max_y + delta_y)
 
-    for i in range(9):
-        for j in range(2):
-            # may need to change this positioning if units sizes are irregular
-            if j == 0:
-                # The peak in the waveform is not half way, so maths says the x axis should be starting at
-                # 0.1 and 0.6 so the middle is at 0.25/0.76 however chosen these values so it loks better by eye
+    for channel_index, good_channel in enumerate(good_channels):
+        i, j = divmod(channel_index, 2)
+        # may need to change this positioning if units sizes are irregular
+        if j == 0:
+            # The peak in the waveform is not half way, so maths says the x axis should be starting at
+            # 0.1 and 0.6 so the middle is at 0.25/0.76 however chosen these values so it loks better by eye
+            ax = fig.add_axes(
+                [
+                    main_ax_offset + main_ax_scale * 0.25,
+                    main_ax_offset
+                    + main_ax_scale
+                    * (i / num_rows - 1 / (2 * num_rows) + waveform_y_offset),
+                    main_ax_scale * 0.25,
+                    main_ax_scale / num_rows,
+                ]
+            )
+        else:
+            ax = fig.add_axes(
+                [
+                    main_ax_offset + main_ax_scale * 0.75,
+                    main_ax_offset
+                    + main_ax_scale
+                    * (i / num_rows - 1 / (2 * num_rows) + waveform_y_offset),
+                    main_ax_scale * 0.25,
+                    main_ax_scale / num_rows,
+                ]
+            )
 
-                #
-                ax = fig.add_axes(
-                    [
-                        main_ax_offset + main_ax_scale * 0.25,
-                        main_ax_offset
-                        + main_ax_scale * (i / 9 - 1 / 18 + waveform_y_offset),
-                        main_ax_scale * 0.25,
-                        main_ax_scale * 1 / 9,
-                    ]
-                )
-            if j == 1:
-                ax = fig.add_axes(
-                    [
-                        main_ax_offset + main_ax_scale * 0.75,
-                        main_ax_offset
-                        + main_ax_scale * (i / 9 - 1 / 18 + waveform_y_offset),
-                        main_ax_scale * 0.25,
-                        main_ax_scale * 1 / 9,
-                    ]
-                )
-
-            if CV == "Avg":
-                ax.plot(
-                    waveform[unit_a, :, good_channels[i * 2 + j]]
-                    .mean(axis=-1)
-                    .squeeze(),
-                    color="g",
-                )
-                ax.plot(
-                    waveform[unit_b, :, good_channels[i * 2 + j]]
-                    .mean(axis=-1)
-                    .squeeze(),
-                    color="b",
-                    lw=0.8,
-                )
-            else:
-                ax.plot(
-                    waveform[unit_a, :, good_channels[i * 2 + j], CV[0]].squeeze(),
-                    color="g",
-                )
-                ax.plot(
-                    waveform[unit_b, :, good_channels[i * 2 + j], CV[1]].squeeze(),
-                    color="b",
-                    lw=0.8,
-                )
-            ax.set_ylim(sub_min_y, sub_max_y)
-            ax.set_axis_off()
+        if CV == "Avg":
+            ax.plot(
+                waveform[unit_a, :, good_channel].mean(axis=-1).squeeze(),
+                color="g",
+            )
+            ax.plot(
+                waveform[unit_b, :, good_channel].mean(axis=-1).squeeze(),
+                color="b",
+                lw=0.8,
+            )
+        else:
+            ax.plot(
+                waveform[unit_a, :, good_channel, CV[0]].squeeze(),
+                color="g",
+            )
+            ax.plot(
+                waveform[unit_b, :, good_channel, CV[1]].squeeze(),
+                color="b",
+                lw=0.8,
+            )
+        ax.set_ylim(sub_min_y, sub_max_y)
+        ax.set_axis_off()
 
     main_ax.spines.right.set_visible(False)
     main_ax.spines.top.set_visible(False)

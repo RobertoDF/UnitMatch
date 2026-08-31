@@ -1,4 +1,3 @@
-import inspect
 import json
 import shutil
 import tempfile
@@ -133,51 +132,6 @@ class SpikeInterfaceSessionMerger:
                 reference.get_channel_locations(),
             ):
                 raise ValueError("All analyzers must use the same channel geometry.")
-
-    @staticmethod
-    def _generate_safe_merge_unit_ids(analyzer, num_merges):
-        visible_unit_ids = np.asarray(analyzer.unit_ids)
-        occupied_unit_ids = visible_unit_ids
-        get_provenance = getattr(analyzer, "get_sorting_provenance", None)
-        if get_provenance is not None:
-            provenance = get_provenance()
-            if provenance is not None:
-                occupied_unit_ids = np.concatenate(
-                    [occupied_unit_ids, np.asarray(provenance.unit_ids)]
-                )
-
-        occupied = set(occupied_unit_ids.tolist())
-        new_unit_ids = []
-        if np.issubdtype(visible_unit_ids.dtype, np.number):
-            candidate = np.max(occupied_unit_ids) + 1
-            while len(new_unit_ids) < num_merges:
-                if candidate not in occupied:
-                    new_unit_ids.append(candidate)
-                    occupied.add(candidate)
-                candidate += 1
-            return np.asarray(
-                new_unit_ids, dtype=visible_unit_ids.dtype
-            ).tolist()
-
-        occupied_strings = {str(unit_id) for unit_id in occupied}
-        if all(unit_id.isdigit() for unit_id in occupied_strings):
-            candidate = max(int(unit_id) for unit_id in occupied_strings) + 1
-            while len(new_unit_ids) < num_merges:
-                candidate_id = str(candidate)
-                if candidate_id not in occupied_strings:
-                    new_unit_ids.append(candidate_id)
-                    occupied_strings.add(candidate_id)
-                candidate += 1
-        else:
-            candidate_index = 0
-            while len(new_unit_ids) < num_merges:
-                candidate = f"unitmatch_merge_{candidate_index}"
-                if candidate not in occupied_strings:
-                    new_unit_ids.append(candidate)
-                    occupied_strings.add(candidate)
-                candidate_index += 1
-
-        return new_unit_ids
 
     def _export_composite_session(self, export_dir):
         source_dir = export_dir / "sources"
@@ -559,114 +513,27 @@ class SpikeInterfaceSessionMerger:
 
     def apply_merges(self, job_kwargs=None):
         """Merge approved groups after every proposal is reviewed."""
-        if job_kwargs is None:
-            job_kwargs = {}
         if self.undecided_groups:
             raise RuntimeError(
                 "Approve or reject every proposed merge before applying: "
                 f"{self.undecided_groups}"
             )
-        if len(self.analyzers) == 1:
-            if np.array_equal(self.unit_ids, self.analyzer.unit_ids):
-                combined_analyzer = self.analyzer
-            else:
-                combined_analyzer = self.analyzer.select_units(self.unit_ids)
-        else:
-            try:
-                from spikeinterface import (
-                    SortingAnalyzer,
-                    aggregate_units,
-                    create_sorting_analyzer,
-                )
-            except ImportError as error:
-                raise ImportError(
-                    "SpikeInterface is required to combine multiple analyzers."
-                ) from error
-
-            selected_sortings = [
-                self._unit_sources[unit_id].sorting.select_units([unit_id])
-                for unit_id in self.unit_ids
-            ]
-            combined_sorting = aggregate_units(
-                selected_sortings, renamed_unit_ids=self.unit_ids
+        if len(self.analyzers) != 1 or self.analyzers[0] is not self.analyzer:
+            raise RuntimeError(
+                "Merges must be applied to the same single analyzer used for review."
             )
-            recording = getattr(self.analyzer, "recording", None)
-            if recording is not None:
-                combined_analyzer = create_sorting_analyzer(
-                    sorting=combined_sorting,
-                    recording=recording,
-                    format="memory",
-                    sparse=False,
-                )
-            else:
-                combined_analyzer = SortingAnalyzer.create_memory(
-                    sorting=combined_sorting,
-                    recording=None,
-                    sparsity=None,
-                    return_in_uV=self.analyzer.return_in_uV,
-                    peak_sign=self.analyzer.peak_sign,
-                    peak_mode=self.analyzer.peak_mode,
-                    rec_attributes=self.analyzer.rec_attributes,
-                )
-
-        if self.approved_groups:
-            if (
-                self.merging_mode == "hard"
-                and getattr(combined_analyzer, "recording", None) is None
-            ):
-                raise RuntimeError(
-                    "Hard merging requires access to the recording traces. "
-                    "Use merging_mode='soft' for a recordingless analyzer."
-                )
-            merge_parameters = inspect.signature(
-                combined_analyzer.merge_units
-            ).parameters
-            if "censor_ms" in merge_parameters:
-                censor_argument = {"censor_ms": self.censored_period_ms}
-            elif "censored_period_ms" in merge_parameters:
-                censor_argument = {
-                    "censored_period_ms": self.censored_period_ms
-                }
-            else:
-                raise TypeError(
-                    "Unsupported SpikeInterface merge_units() signature: "
-                    "missing censor_ms/censored_period_ms."
-                )
-            new_unit_ids = self._generate_safe_merge_unit_ids(
-                combined_analyzer, len(self.approved_groups)
-            )
-            self.merged_analyzer, merged_unit_ids = combined_analyzer.merge_units(
-                merge_unit_groups=self.approved_groups,
-                new_unit_ids=new_unit_ids,
-                merging_mode=self.merging_mode,
-                return_new_unit_ids=True,
-                **censor_argument,
-                **job_kwargs,
-            )
-            self.merged_unit_ids = list(merged_unit_ids)
-            merged_source_ids = {
-                unit_id
-                for group in self.approved_groups
-                for unit_id in group
-            }
-            expected_unit_ids = (
-                set(combined_analyzer.unit_ids.tolist())
-                - merged_source_ids
-            ) | set(merged_unit_ids)
-            actual_unit_ids = set(self.merged_analyzer.unit_ids.tolist())
-            assert actual_unit_ids == expected_unit_ids, (
-                "Merged analyzer has unexpected units: "
-                f"expected {sorted(expected_unit_ids)}, "
-                f"got {sorted(actual_unit_ids)}"
-            )
-            for group, merged_unit_id in zip(
-                self.approved_groups, merged_unit_ids
-            ):
-                source_ids = ",".join(str(unit_id) for unit_id in group)
-                print(f"{source_ids} -> {merged_unit_id}")
-        else:
-            self.merged_analyzer = combined_analyzer
+        if not self.approved_groups:
+            self.merged_analyzer = self.analyzer
             self.merged_unit_ids = []
+            return self.merged_analyzer
+
+        self.merged_analyzer, self.merged_unit_ids = self.analyzer.merge_units(
+            merge_unit_groups=self.approved_groups,
+            censor_ms=self.censored_period_ms,
+            merging_mode=self.merging_mode,
+            return_new_unit_ids=True,
+            **(job_kwargs or {}),
+        )
         return self.merged_analyzer
 
     def save(self, folder, format="binary_folder", overwrite=False):
