@@ -2,6 +2,7 @@ import json
 import shutil
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,28 @@ from . import utils as util
 from .assign_unique_id import get_within_session_merge_groups
 from .default_params import get_default_param
 from .save_utils import make_UnitMatch_folder_from_sorting_analyzers
+
+
+@dataclass
+class _UnitDiagnostics:
+    times_ms: np.ndarray
+    mean_waveforms: np.ndarray
+    channel_indices: np.ndarray
+    peak_channel_index: int
+    peak_location: np.ndarray
+    channel_locations: np.ndarray
+    spike_times_s: np.ndarray
+    spike_amplitudes: np.ndarray
+    all_spike_times_s: np.ndarray
+
+    def waveform_on_channel(self, channel_index):
+        local_indices = np.flatnonzero(self.channel_indices == channel_index)
+        if local_indices.size == 0:
+            raise ValueError(
+                f"Global channel index {channel_index} is outside the unit's "
+                "waveform sparsity."
+            )
+        return self.mean_waveforms[:, local_indices[0]]
 
 
 def _probe_plot_axes(channel_locations):
@@ -299,14 +322,16 @@ class SpikeInterfaceSessionMerger:
         spike_amplitudes = waveforms[
             :, peak_sample_index, peak_channel_index
         ]
-        return (
-            times_ms,
-            mean_waveforms[:, peak_channel_index],
-            peak_location,
-            channel_locations,
-            spike_times_s,
-            spike_amplitudes,
-            all_spike_times_s,
+        return _UnitDiagnostics(
+            times_ms=times_ms,
+            mean_waveforms=mean_waveforms,
+            channel_indices=channel_indices,
+            peak_channel_index=int(channel_indices[peak_channel_index]),
+            peak_location=peak_location,
+            channel_locations=channel_locations,
+            spike_times_s=spike_times_s,
+            spike_amplitudes=spike_amplitudes,
+            all_spike_times_s=all_spike_times_s,
         )
 
     def _make_group_figure(self, group):
@@ -325,20 +350,31 @@ class SpikeInterfaceSessionMerger:
             1, 4, figsize=(16, 3), constrained_layout=True
         )
 
-        for unit_id, color, diagnostic in zip(group, colors, diagnostics):
-            times_ms, waveform = diagnostic[:2]
-            waveform_axis.plot(
-                times_ms, waveform, color=color, label=f"Unit {unit_id}"
-            )
+        for unit_index, (unit_id, color, diagnostic) in enumerate(
+            zip(group, colors, diagnostics)
+        ):
+            for peak_owner_index, peak_owner_id in enumerate(group):
+                peak_channel_index = diagnostics[
+                    peak_owner_index
+                ].peak_channel_index
+                waveform_axis.plot(
+                    diagnostic.times_ms,
+                    diagnostic.waveform_on_channel(peak_channel_index),
+                    color=color,
+                    linestyle="-" if unit_index == peak_owner_index else "--",
+                    label=(
+                        f"Unit {unit_id} on unit {peak_owner_id} peak channel"
+                    ),
+                )
         waveform_axis.axvline(0, color="0.7", linewidth=0.8)
         waveform_axis.set(
-            title="Mean waveform on peak channel",
+            title="Mean waveforms on both peak channels",
             xlabel="Time (ms)",
             ylabel="Amplitude",
         )
-        waveform_axis.legend()
+        waveform_axis.legend(fontsize="small")
 
-        channel_locations = diagnostics[0][3]
+        channel_locations = diagnostics[0].channel_locations
         horizontal_axis, depth_axis = _probe_plot_axes(channel_locations)
         probe_axis.scatter(
             channel_locations[:, horizontal_axis],
@@ -348,7 +384,7 @@ class SpikeInterfaceSessionMerger:
             label="Channels",
         )
         for unit_id, color, diagnostic in zip(group, colors, diagnostics):
-            peak_location = diagnostic[2]
+            peak_location = diagnostic.peak_location
             probe_axis.scatter(
                 peak_location[horizontal_axis],
                 peak_location[depth_axis],
@@ -367,10 +403,9 @@ class SpikeInterfaceSessionMerger:
         probe_axis.legend(fontsize="small")
 
         for unit_id, color, diagnostic in zip(group, colors, diagnostics):
-            spike_times_s, spike_amplitudes = diagnostic[4:6]
             amplitude_axis.scatter(
-                spike_times_s,
-                spike_amplitudes,
+                diagnostic.spike_times_s,
+                diagnostic.spike_amplitudes,
                 color=color,
                 s=10,
                 alpha=0.6,
@@ -395,7 +430,9 @@ class SpikeInterfaceSessionMerger:
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         bin_widths = np.diff(bin_edges)
         for unit_id, color, diagnostic in zip(group, colors, diagnostics):
-            spike_counts, _ = np.histogram(diagnostic[6], bins=bin_edges)
+            spike_counts, _ = np.histogram(
+                diagnostic.all_spike_times_s, bins=bin_edges
+            )
             firing_rates = spike_counts / bin_widths
             rate_axis.plot(
                 bin_centers,

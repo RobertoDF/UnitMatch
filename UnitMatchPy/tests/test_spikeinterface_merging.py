@@ -168,25 +168,24 @@ def test_rejects_unknown_merging_mode():
 def test_unit_diagnostics_include_waveform_and_peak_location():
     merger = SpikeInterfaceSessionMerger(_Analyzer())
 
-    (
-        times_ms,
-        waveform,
-        peak_location,
-        channel_locations,
-        spike_times_s,
-        spike_amplitudes,
-        all_spike_times_s,
-    ) = (
-        merger._get_unit_diagnostics(10)
-    )
+    diagnostics = merger._get_unit_diagnostics(10)
 
-    np.testing.assert_allclose(times_ms, [-1.0, -0.96666667, -0.93333333])
-    np.testing.assert_allclose(waveform, [0.0, -3.0, 0.0])
-    np.testing.assert_array_equal(peak_location, [0, 0])
-    np.testing.assert_array_equal(channel_locations, [[0, 0], [0, 20]])
-    np.testing.assert_array_equal(spike_times_s, [0.0, 2.0])
-    np.testing.assert_array_equal(spike_amplitudes, [-2.0, -4.0])
-    np.testing.assert_array_equal(all_spike_times_s, [0.0, 1.0, 2.0])
+    np.testing.assert_allclose(
+        diagnostics.times_ms, [-1.0, -0.96666667, -0.93333333]
+    )
+    np.testing.assert_allclose(
+        diagnostics.waveform_on_channel(0), [0.0, -3.0, 0.0]
+    )
+    assert diagnostics.peak_channel_index == 0
+    np.testing.assert_array_equal(diagnostics.peak_location, [0, 0])
+    np.testing.assert_array_equal(
+        diagnostics.channel_locations, [[0, 0], [0, 20]]
+    )
+    np.testing.assert_array_equal(diagnostics.spike_times_s, [0.0, 2.0])
+    np.testing.assert_array_equal(diagnostics.spike_amplitudes, [-2.0, -4.0])
+    np.testing.assert_array_equal(
+        diagnostics.all_spike_times_s, [0.0, 1.0, 2.0]
+    )
 
 
 def test_group_figure_renders_waveforms_and_probe_locations():
@@ -195,10 +194,79 @@ def test_group_figure_renders_waveforms_and_probe_locations():
     figure = merger._make_group_figure([10, 11])
 
     assert len(figure.axes) == 4
-    assert figure.axes[0].get_title() == "Mean waveform on peak channel"
+    assert figure.axes[0].get_title() == "Mean waveforms on both peak channels"
     assert figure.axes[1].get_title() == "Peak location on probe"
     assert figure.axes[2].get_title() == "Spike amplitudes over time"
     assert figure.axes[3].get_title() == "Spike rate over time"
+
+
+class _SparseWaveforms(_Waveforms):
+    @staticmethod
+    def get_waveforms_one_unit(unit_id):
+        peak_values = {
+            10: [-1.0, -10.0, -4.0],
+            11: [-2.0, -5.0, -12.0],
+        }[unit_id]
+        waveform = np.zeros((2, 3, 3))
+        waveform[:, 1, :] = peak_values
+        return waveform
+
+
+class _SparseMapping:
+    unit_id_to_channel_indices = {
+        10: np.array([0, 2, 3]),
+        11: np.array([1, 2, 3]),
+    }
+
+
+class _SparseAnalyzer(_Analyzer):
+    sparsity = _SparseMapping()
+
+    def __init__(self):
+        super().__init__([10, 11])
+
+    @staticmethod
+    def get_num_channels():
+        return 4
+
+    @staticmethod
+    def get_channel_locations():
+        return np.array([[0, 0], [10, 0], [20, 0], [30, 0]])
+
+    def get_extension(self, name):
+        if name == "waveforms":
+            return _SparseWaveforms()
+        return super().get_extension(name)
+
+
+def test_group_figure_maps_both_sparse_peak_channels():
+    merger = SpikeInterfaceSessionMerger(_SparseAnalyzer())
+
+    figure = merger._make_group_figure([10, 11])
+
+    waveform_lines = figure.axes[0].lines[:4]
+    assert [line.get_label() for line in waveform_lines] == [
+        "Unit 10 on unit 10 peak channel",
+        "Unit 10 on unit 11 peak channel",
+        "Unit 11 on unit 10 peak channel",
+        "Unit 11 on unit 11 peak channel",
+    ]
+    assert [line.get_color() for line in waveform_lines] == [
+        "tab:blue",
+        "tab:blue",
+        "tab:orange",
+        "tab:orange",
+    ]
+    assert [line.get_linestyle() for line in waveform_lines] == [
+        "-",
+        "--",
+        "--",
+        "-",
+    ]
+    np.testing.assert_array_equal(
+        [line.get_ydata()[1] for line in waveform_lines],
+        [-10.0, -4.0, -5.0, -12.0],
+    )
 
 
 def test_save_requires_applied_analyzer(tmp_path):
