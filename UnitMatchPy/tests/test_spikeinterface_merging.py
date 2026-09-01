@@ -189,15 +189,19 @@ def test_unit_diagnostics_include_waveform_and_peak_location():
 
 
 def test_group_figure_renders_waveforms_and_probe_locations():
-    merger = SpikeInterfaceSessionMerger(_Analyzer())
+    merger = SpikeInterfaceSessionMerger(_SparseAnalyzer())
 
     figure = merger._make_group_figure([10, 11])
 
-    assert len(figure.axes) == 4
-    assert figure.axes[0].get_title() == "Mean waveforms on both peak channels"
-    assert figure.axes[1].get_title() == "Peak location on probe"
-    assert figure.axes[2].get_title() == "Spike amplitudes over time"
-    assert figure.axes[3].get_title() == "Spike rate over time"
+    assert len(figure.axes) == 6
+    assert [axis.get_title() for axis in figure.axes[:3]] == [
+        "Global channel 2 (20, 0 um)",
+        "Global channel 3 (30, 0 um)",
+        "Global channel 1 (10, 0 um)",
+    ]
+    assert figure.axes[3].get_title() == "Peak location on probe"
+    assert figure.axes[4].get_title() == "Spike amplitudes over time"
+    assert figure.axes[5].get_title() == "Spike rate over time"
 
 
 class _SparseWaveforms(_Waveforms):
@@ -239,34 +243,59 @@ class _SparseAnalyzer(_Analyzer):
         return super().get_extension(name)
 
 
-def test_group_figure_maps_both_sparse_peak_channels():
+def test_select_waveform_channels_around_shared_peak():
+    channel_locations = np.array([[0, 0], [10, 0], [-10, 0], [30, 0]])
+
+    selected = SpikeInterfaceSessionMerger._select_waveform_channels(
+        [0, 0], channel_locations
+    )
+
+    assert selected == [0, 1, 2]
+
+
+def test_select_waveform_third_channel_uses_distance_sum_and_index_tie_break():
+    channel_locations = np.array([[0, 0], [1, 0], [2, 0], [3, 0]])
+
+    selected = SpikeInterfaceSessionMerger._select_waveform_channels(
+        [0, 3], channel_locations
+    )
+
+    assert selected == [0, 3, 1]
+
+
+def test_group_figure_maps_three_global_channels_through_sparsity():
     merger = SpikeInterfaceSessionMerger(_SparseAnalyzer())
 
     figure = merger._make_group_figure([10, 11])
 
-    waveform_lines = figure.axes[0].lines[:4]
-    assert [line.get_color() for line in waveform_lines] == [
-        "tab:blue",
-        "tab:blue",
-        "tab:orange",
-        "tab:orange",
-    ]
-    assert [line.get_linestyle() for line in waveform_lines] == [
-        "-",
-        "--",
-        "-",
-        "--",
-    ]
+    waveform_axes = figure.axes[:3]
+    assert [len(axis.lines) - 1 for axis in waveform_axes] == [2, 2, 1]
     np.testing.assert_array_equal(
-        [line.get_ydata()[1] for line in waveform_lines],
-        [-10.0, -4.0, -5.0, -12.0],
+        [line.get_ydata()[1] for line in waveform_axes[0].lines[:2]],
+        [-10.0, -5.0],
     )
-    legend = figure.axes[0].get_legend()
+    np.testing.assert_array_equal(
+        [line.get_ydata()[1] for line in waveform_axes[1].lines[:2]],
+        [-4.0, -12.0],
+    )
+    np.testing.assert_array_equal(
+        [line.get_ydata()[1] for line in waveform_axes[2].lines[:1]],
+        [-2.0],
+    )
+    assert [line.get_color() for line in waveform_axes[0].lines[:2]] == [
+        "tab:blue",
+        "tab:orange",
+    ]
+    assert all(
+        line.get_linestyle() == "-"
+        for axis in waveform_axes
+        for line in axis.lines[:-1]
+    )
+    assert waveform_axes[2].texts[0].get_text() == "Not in sparsity: unit 10"
+    legend = waveform_axes[0].get_legend()
     assert [text.get_text() for text in legend.get_texts()] == [
         "Unit 10",
         "Unit 11",
-        "Peak: unit 10",
-        "Peak: unit 11",
     ]
     assert max(text.get_fontsize() for text in legend.get_texts()) <= 8
     assert legend.handlelength == 1.2

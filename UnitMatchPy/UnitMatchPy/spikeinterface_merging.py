@@ -27,6 +27,9 @@ class _UnitDiagnostics:
     spike_amplitudes: np.ndarray
     all_spike_times_s: np.ndarray
 
+    def has_channel(self, channel_index):
+        return np.any(self.channel_indices == channel_index)
+
     def waveform_on_channel(self, channel_index):
         local_indices = np.flatnonzero(self.channel_indices == channel_index)
         if local_indices.size == 0:
@@ -281,6 +284,39 @@ class SpikeInterfaceSessionMerger:
             if decision is None
         ]
 
+    @staticmethod
+    def _select_waveform_channels(peak_channel_indices, channel_locations):
+        """Select three global channels around one or two unit peaks."""
+        channel_locations = np.asarray(channel_locations)
+        if channel_locations.shape[0] < 3:
+            raise ValueError(
+                "Waveform review requires at least three recording channels."
+            )
+
+        first_peak, second_peak = map(int, peak_channel_indices)
+        channel_indices = np.arange(channel_locations.shape[0])
+        if first_peak == second_peak:
+            distances = np.linalg.norm(
+                channel_locations - channel_locations[first_peak], axis=1
+            )
+            candidates = channel_indices[channel_indices != first_peak]
+            nearest = sorted(candidates, key=lambda index: (distances[index], index))
+            return [first_peak, int(nearest[0]), int(nearest[1])]
+
+        excluded = {first_peak, second_peak}
+        candidates = [
+            index for index in channel_indices if index not in excluded
+        ]
+        distance_sums = np.linalg.norm(
+            channel_locations - channel_locations[first_peak], axis=1
+        ) + np.linalg.norm(
+            channel_locations - channel_locations[second_peak], axis=1
+        )
+        third_channel = min(
+            candidates, key=lambda index: (distance_sums[index], index)
+        )
+        return [first_peak, second_peak, int(third_channel)]
+
     def _get_unit_diagnostics(self, unit_id):
         analyzer = self._unit_sources[unit_id]
         waveforms_extension = analyzer.get_extension("waveforms")
@@ -342,52 +378,72 @@ class SpikeInterfaceSessionMerger:
         diagnostics = [
             self._get_unit_diagnostics(unit_id) for unit_id in group
         ]
-        figure, (
-            waveform_axis,
-            probe_axis,
-            amplitude_axis,
-            rate_axis,
-        ) = plt.subplots(
-            1, 4, figsize=(16, 3), constrained_layout=True
+        channel_locations = diagnostics[0].channel_locations
+        waveform_channel_indices = self._select_waveform_channels(
+            [diagnostic.peak_channel_index for diagnostic in diagnostics],
+            channel_locations,
         )
+        figure = plt.figure(figsize=(16, 6), constrained_layout=True)
+        outer_grid = figure.add_gridspec(
+            1, 4, width_ratios=(1.35, 1, 1, 1)
+        )
+        waveform_grid = outer_grid[0].subgridspec(3, 1, hspace=0.08)
+        waveform_axes = [figure.add_subplot(waveform_grid[0])]
+        waveform_axes.extend(
+            figure.add_subplot(waveform_grid[index], sharex=waveform_axes[0])
+            for index in range(1, 3)
+        )
+        probe_axis = figure.add_subplot(outer_grid[1])
+        amplitude_axis = figure.add_subplot(outer_grid[2])
+        rate_axis = figure.add_subplot(outer_grid[3])
 
-        for unit_id, color, diagnostic in zip(group, colors, diagnostics):
-            for peak_owner_index in range(len(group)):
-                peak_channel_index = diagnostics[
-                    peak_owner_index
-                ].peak_channel_index
-                waveform_axis.plot(
-                    diagnostic.times_ms,
-                    diagnostic.waveform_on_channel(peak_channel_index),
-                    color=color,
-                    linestyle="-" if peak_owner_index == 0 else "--",
+        for waveform_axis, channel_index in zip(
+            waveform_axes, waveform_channel_indices
+        ):
+            missing_units = []
+            for unit_id, color, diagnostic in zip(group, colors, diagnostics):
+                if diagnostic.has_channel(channel_index):
+                    waveform_axis.plot(
+                        diagnostic.times_ms,
+                        diagnostic.waveform_on_channel(channel_index),
+                        color=color,
+                        linestyle="-",
+                    )
+                else:
+                    missing_units.append(str(unit_id))
+            if missing_units:
+                waveform_axis.text(
+                    0.99,
+                    0.04,
+                    f"Not in sparsity: unit {', '.join(missing_units)}",
+                    transform=waveform_axis.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize="xx-small",
+                    color="0.35",
                 )
-        waveform_axis.axvline(0, color="0.7", linewidth=0.8)
-        waveform_axis.set(
-            title="Mean waveforms on both peak channels",
-            xlabel="Time (ms)",
-            ylabel="Amplitude",
-        )
+            location = channel_locations[channel_index]
+            location_text = ", ".join(f"{coordinate:g}" for coordinate in location)
+            waveform_axis.axvline(0, color="0.7", linewidth=0.8)
+            waveform_axis.set_title(
+                f"Global channel {channel_index} ({location_text} um)",
+                fontsize="small",
+            )
+            waveform_axis.set_ylabel("Amplitude", fontsize="small")
+            waveform_axis.tick_params(labelsize="x-small")
+        waveform_axes[-1].set_xlabel("Time (ms)")
+        for waveform_axis in waveform_axes[:-1]:
+            waveform_axis.tick_params(labelbottom=False)
+
         legend_handles = [
             Line2D([], [], color=color, label=f"Unit {unit_id}")
             for unit_id, color in zip(group, colors)
         ]
-        legend_handles.extend(
-            [
-                Line2D(
-                    [],
-                    [],
-                    color="0.25",
-                    linestyle="-" if peak_owner_index == 0 else "--",
-                    label=f"Peak: unit {peak_owner_id}",
-                )
-                for peak_owner_index, peak_owner_id in enumerate(group)
-            ]
-        )
-        waveform_axis.legend(
+        waveform_axes[0].legend(
             handles=legend_handles,
-            loc="upper left",
-            bbox_to_anchor=(1.0, 1.0),
+            loc="lower left",
+            bbox_to_anchor=(0, 1.02),
+            ncol=2,
             fontsize="x-small",
             handlelength=1.2,
             handletextpad=0.4,
@@ -396,7 +452,6 @@ class SpikeInterfaceSessionMerger:
             borderaxespad=0.2,
         )
 
-        channel_locations = diagnostics[0].channel_locations
         horizontal_axis, depth_axis = _probe_plot_axes(channel_locations)
         probe_axis.scatter(
             channel_locations[:, horizontal_axis],
