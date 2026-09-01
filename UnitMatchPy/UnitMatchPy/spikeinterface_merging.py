@@ -54,6 +54,37 @@ def _probe_plot_axes(channel_locations):
     return horizontal_axis, depth_axis
 
 
+def _select_waveform_channels(peak_channel_indices, channel_locations):
+    """Select three global channels around one or two unit peaks."""
+    channel_locations = np.asarray(channel_locations)
+    if channel_locations.shape[0] < 3:
+        raise ValueError(
+            "Waveform review requires at least three recording channels."
+        )
+
+    first_peak, second_peak = map(int, peak_channel_indices)
+    channel_indices = np.arange(channel_locations.shape[0])
+    if first_peak == second_peak:
+        distances = np.linalg.norm(
+            channel_locations - channel_locations[first_peak], axis=1
+        )
+        candidates = channel_indices[channel_indices != first_peak]
+        nearest = sorted(candidates, key=lambda index: (distances[index], index))
+        return [first_peak, int(nearest[0]), int(nearest[1])]
+
+    excluded = {first_peak, second_peak}
+    candidates = [index for index in channel_indices if index not in excluded]
+    distance_sums = np.linalg.norm(
+        channel_locations - channel_locations[first_peak], axis=1
+    ) + np.linalg.norm(
+        channel_locations - channel_locations[second_peak], axis=1
+    )
+    third_channel = min(
+        candidates, key=lambda index: (distance_sums[index], index)
+    )
+    return [first_peak, second_peak, int(third_channel)]
+
+
 class SpikeInterfaceSessionMerger:
     """Review and soft-merge likely over-split units in one logical session.
 
@@ -284,39 +315,6 @@ class SpikeInterfaceSessionMerger:
             if decision is None
         ]
 
-    @staticmethod
-    def _select_waveform_channels(peak_channel_indices, channel_locations):
-        """Select three global channels around one or two unit peaks."""
-        channel_locations = np.asarray(channel_locations)
-        if channel_locations.shape[0] < 3:
-            raise ValueError(
-                "Waveform review requires at least three recording channels."
-            )
-
-        first_peak, second_peak = map(int, peak_channel_indices)
-        channel_indices = np.arange(channel_locations.shape[0])
-        if first_peak == second_peak:
-            distances = np.linalg.norm(
-                channel_locations - channel_locations[first_peak], axis=1
-            )
-            candidates = channel_indices[channel_indices != first_peak]
-            nearest = sorted(candidates, key=lambda index: (distances[index], index))
-            return [first_peak, int(nearest[0]), int(nearest[1])]
-
-        excluded = {first_peak, second_peak}
-        candidates = [
-            index for index in channel_indices if index not in excluded
-        ]
-        distance_sums = np.linalg.norm(
-            channel_locations - channel_locations[first_peak], axis=1
-        ) + np.linalg.norm(
-            channel_locations - channel_locations[second_peak], axis=1
-        )
-        third_channel = min(
-            candidates, key=lambda index: (distance_sums[index], index)
-        )
-        return [first_peak, second_peak, int(third_channel)]
-
     def _get_unit_diagnostics(self, unit_id):
         analyzer = self._unit_sources[unit_id]
         waveforms_extension = analyzer.get_extension("waveforms")
@@ -379,7 +377,7 @@ class SpikeInterfaceSessionMerger:
             self._get_unit_diagnostics(unit_id) for unit_id in group
         ]
         channel_locations = diagnostics[0].channel_locations
-        waveform_channel_indices = self._select_waveform_channels(
+        waveform_channel_indices = _select_waveform_channels(
             [diagnostic.peak_channel_index for diagnostic in diagnostics],
             channel_locations,
         )

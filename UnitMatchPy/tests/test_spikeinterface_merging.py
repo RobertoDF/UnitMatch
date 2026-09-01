@@ -1,6 +1,9 @@
 import numpy as np
 import pytest
-from UnitMatchPy.spikeinterface_merging import SpikeInterfaceSessionMerger
+from UnitMatchPy.spikeinterface_merging import (
+    SpikeInterfaceSessionMerger,
+    _select_waveform_channels,
+)
 
 
 def test_session_merger_uses_conservative_spatial_limit():
@@ -246,9 +249,7 @@ class _SparseAnalyzer(_Analyzer):
 def test_select_waveform_channels_around_shared_peak():
     channel_locations = np.array([[0, 0], [10, 0], [-10, 0], [30, 0]])
 
-    selected = SpikeInterfaceSessionMerger._select_waveform_channels(
-        [0, 0], channel_locations
-    )
+    selected = _select_waveform_channels([0, 0], channel_locations)
 
     assert selected == [0, 1, 2]
 
@@ -256,9 +257,7 @@ def test_select_waveform_channels_around_shared_peak():
 def test_select_waveform_third_channel_uses_distance_sum_and_index_tie_break():
     channel_locations = np.array([[0, 0], [1, 0], [2, 0], [3, 0]])
 
-    selected = SpikeInterfaceSessionMerger._select_waveform_channels(
-        [0, 3], channel_locations
-    )
+    selected = _select_waveform_channels([0, 3], channel_locations)
 
     assert selected == [0, 3, 1]
 
