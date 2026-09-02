@@ -140,14 +140,18 @@ def _filter_pairs_by_isi(pairs, clus_info, param):
 
 
 def get_within_session_merge_groups(
-    output_prob_array, param, clus_info, match_threshold=None
+    output_prob_array,
+    param,
+    clus_info,
+    match_threshold=None,
+    match_mode="or",
 ):
     """Return disjoint, ISI-safe unit pairs for session-local merging.
 
-    A pair is proposed only when both split-half comparison directions exceed
-    the probability threshold. Pairs are considered from highest to lowest
-    mean probability, and each unit is included at most once. Run UnitMatch
-    again after merging to discover additional over-splits.
+    A pair is proposed when either split-half comparison direction exceeds the
+    probability threshold by default. Pairs are considered from highest to
+    lowest mean probability, and each unit is included at most once. Run
+    UnitMatch again after merging to discover additional over-splits.
     """
     output_prob_array = np.asarray(output_prob_array)
     if output_prob_array.ndim != 2 or output_prob_array.shape[0] != output_prob_array.shape[1]:
@@ -169,9 +173,17 @@ def get_within_session_merge_groups(
     threshold = (
         param["match_threshold"] if match_threshold is None else match_threshold
     )
-    pair_mask = (output_prob_array > threshold) & (
-        output_prob_array.T > threshold
-    )
+    match_mode = match_mode.lower()
+    if match_mode == "or":
+        pair_mask = (output_prob_array > threshold) | (
+            output_prob_array.T > threshold
+        )
+    elif match_mode == "and":
+        pair_mask = (output_prob_array > threshold) & (
+            output_prob_array.T > threshold
+        )
+    else:
+        raise ValueError("match_mode must be 'or' or 'and'")
     pair_mask &= session_ids[:, None] == session_ids[None, :]
     candidate_pairs = np.argwhere(np.triu(pair_mask, k=1))
     if candidate_pairs.size == 0:

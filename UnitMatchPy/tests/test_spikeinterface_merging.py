@@ -1,5 +1,8 @@
+from typing import ClassVar
+
 import numpy as np
 import pytest
+from matplotlib import pyplot as plt
 from UnitMatchPy.spikeinterface_merging import (
     SpikeInterfaceSessionMerger,
     _select_waveform_channels,
@@ -187,6 +190,9 @@ def test_unit_diagnostics_include_waveform_and_peak_location():
     np.testing.assert_array_equal(diagnostics.spike_times_s, [0.0, 2.0])
     np.testing.assert_array_equal(diagnostics.spike_amplitudes, [-2.0, -4.0])
     np.testing.assert_array_equal(
+        diagnostics.spike_amplitudes_on_channel(1), [-1.0, -2.0]
+    )
+    np.testing.assert_array_equal(
         diagnostics.all_spike_times_s, [0.0, 1.0, 2.0]
     )
 
@@ -196,15 +202,29 @@ def test_group_figure_renders_waveforms_and_probe_locations():
 
     figure = merger._make_group_figure([10, 11])
 
-    assert len(figure.axes) == 6
-    assert [axis.get_title() for axis in figure.axes[:3]] == [
+    assert len(figure.axes) == 8
+    channel_titles = [
         "Global channel 2 (20, 0 um)",
         "Global channel 3 (30, 0 um)",
         "Global channel 1 (10, 0 um)",
     ]
-    assert figure.axes[3].get_title() == "Peak location on probe"
-    assert figure.axes[4].get_title() == "Spike amplitudes over time"
-    assert figure.axes[5].get_title() == "Spike rate over time"
+    assert [axis.get_title() for axis in figure.axes[:3]] == channel_titles
+    assert [axis.get_title() for axis in figure.axes[3:6]] == channel_titles
+    assert figure.axes[6].get_title() == "Spike rate over time"
+    assert figure.axes[7].get_title() == "Peak location on probe"
+    assert len(figure._unitmatch_span_selectors) == 3
+
+    original_waveform = figure.axes[0].lines[0].get_ydata().copy()
+    figure._unitmatch_update_interval(0.5, 1.5)
+    selected_waveform = figure.axes[0].lines[0].get_ydata()
+    assert not np.array_equal(original_waveform, selected_waveform)
+
+    figure._unitmatch_reset_waveforms()
+    np.testing.assert_array_equal(
+        figure.axes[0].lines[0].get_ydata(),
+        original_waveform,
+    )
+    plt.close(figure)
 
 
 class _SparseWaveforms(_Waveforms):
@@ -220,7 +240,7 @@ class _SparseWaveforms(_Waveforms):
 
 
 class _SparseMapping:
-    unit_id_to_channel_indices = {
+    unit_id_to_channel_indices: ClassVar = {
         10: np.array([0, 2, 3]),
         11: np.array([1, 2, 3]),
     }
@@ -299,6 +319,7 @@ def test_group_figure_maps_three_global_channels_through_sparsity():
     assert max(text.get_fontsize() for text in legend.get_texts()) <= 8
     assert legend.handlelength == 1.2
     assert legend.labelspacing == 0.2
+    plt.close(figure)
 
 
 def test_save_requires_applied_analyzer(tmp_path):

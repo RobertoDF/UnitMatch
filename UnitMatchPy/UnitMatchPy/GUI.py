@@ -8,6 +8,19 @@ import os
 import pickle
 
 
+UNIT_A_COLOR = "#EB6534"
+UNIT_B_COLOR = "#FBFAF8"
+APPROVED_MATCH_COLOR = "#43A047"
+ALL_SCORES_COLOR = "#C0E6DE"
+
+
+def _widget_exists(widget):
+    try:
+        return bool(widget.winfo_exists())
+    except TclError:
+        return False
+
+
 def precalculate_all_acgs(
     clus_info, param, save_path=None, bin_size=0.001, max_lag=0.05
 ):
@@ -265,6 +278,12 @@ def run_GUI():
     is_match = []
     not_match = []
     root = Tk()
+
+    def close_gui():
+        root.quit()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", close_gui)
     # Get screen width and height
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
@@ -275,7 +294,7 @@ def run_GUI():
     root.geometry(f"{window_width}x{window_height}+50+50")
 
     # Configure column weights to prevent plot squashing
-    for i in range(7):  # Configure columns 0-6
+    for i in range(9):  # Configure columns 0-8
         root.columnconfigure(i, weight=1)
     # Configure rows to expand properly
     for i in range(10):  # Configure rows 0-9
@@ -331,15 +350,16 @@ def run_GUI():
     original_id_label = ttk.Label(root)
     raw_waveform_plot = Canvas(root)
     hist_plot = Canvas(root)
+    acg_plot = Canvas(root)
 
     # Unit entry
     ######################################################################################
-    # Will have Unit A - color green and unit B- color Blue
+    # Keep unit colors consistent across every GUI panel.
     entry_frame = ttk.LabelFrame(root, text="Select Units")
     label_a = ttk.Label(entry_frame, text="Unit A")
-    label_a.configure(foreground="green")
+    label_a.configure(foreground=UNIT_A_COLOR)
     label_b = ttk.Label(entry_frame, text="Unit B")
-    label_b.configure(foreground="blue")
+    label_b.configure(foreground=UNIT_B_COLOR)
 
     # select the session
     sessions_list = np.arange(1, param["n_sessions"] + 1).tolist()
@@ -370,73 +390,19 @@ def run_GUI():
     # selecting the unit
     session_a = int(session_entry_a.get())
     session_b = int(session_entry_b.get())
-    CV = get_cv_option()
-    CV_option = CV_tkinter.get() - 1  # want 0 for cv (1,2) , want 1 for cv (2,1)
-    if CV == "Avg":
-        # Use average CV values
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_a - 1] <= matches_avg[:, 0])
-            * (matches_avg[:, 0] < session_switch[session_a])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_b - 1] <= matches_avg[:, 1])
-            * (matches_avg[:, 1] < session_switch[session_b])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-        option_a = matches_avg[tmp_idx_a[in_both], :].tolist()
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(option_a[0][0])
-
-        option_b = np.flip(
-            np.argsort(
-                output_avg[
-                    int(entry_a.get()),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
-
-    else:
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_a - 1] <= matches_GUI[CV_option][:, 0])
-            * (matches_GUI[CV_option][:, 0] < session_switch[session_a])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_b - 1] <= matches_GUI[CV_option][:, 1])
-            * (matches_GUI[CV_option][:, 1] < session_switch[session_b])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-
-        option_a = matches_GUI[CV_option][tmp_idx_a[in_both], :].tolist()
-        if CV_option == 0:
-            option_a = sorted(option_a)
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(option_a[0][0])
-
-        option_b = np.flip(
-            np.argsort(
-                output_GUI[CV_option][
-                    int(entry_a.get()),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
+    option_a = get_ranked_unit_a_options(session_a, session_b)
+    entry_a = ttk.Combobox(
+        entry_frame, values=get_unit_a_display_options(), width=18
+    )
+    entry_a.set(option_a[0][0])
+    option_b = get_ranked_unit_b_options(int(entry_a.get()), session_b)
 
     ##################
     entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(option_b[0])
+    entry_b.current(0)
     entry_a.bind("<<ComboboxSelected>>", update_units)
-    entry_b.bind("<<ComboboxSelected>>", update)
+    enable_unit_a_review_colors()
+    bind_unit_b_navigation()
 
     session_entry_a.bind("<<ComboboxSelected>>", update_unit_entryA)
     session_entry_b.bind("<<ComboboxSelected>>", update_unit_entryB)
@@ -484,6 +450,11 @@ def run_GUI():
     ######################################################################################
     match_button = ttk.Button(root, text="Set as Match", command=set_match)
     non_match_button = ttk.Button(root, text="Set as Non Match", command=set_not_match)
+    pair_lookup_button = ttk.Button(
+        root,
+        text="Inspect Pair",
+        command=open_pair_lookup,
+    )
 
     # Toggle Plots
     ######################################################################################
@@ -492,7 +463,7 @@ def run_GUI():
     toggle_acg_val = BooleanVar()
     toggle_raw_val.set(False)
     toggle_UM_score_val.set(False)
-    toggle_acg_val.set(True)  # Default to hiding ACGs
+    toggle_acg_val.set(False)
     toggle_raw_plot = ttk.Checkbutton(
         root, text="Hide Raw Data", variable=toggle_raw_val
     )
@@ -506,10 +477,6 @@ def run_GUI():
     # Set up Key-Board shortcuts
     root.bind_all("u", update)
     root.bind_all("<Return>", update)
-    root.bind_all("<Right>", next_pair)
-    root.bind_all("<Left>", previous_pair)
-    root.bind_all("<Up>", up_options_b_list)
-    root.bind_all("<Down>", down_options_b_list)
     root.bind_all("q", set_match)
     root.bind_all("m", set_match)
     root.bind_all("e", set_not_match)
@@ -522,6 +489,7 @@ def run_GUI():
     toggle_UM_score_plot.grid(row=1, column=2, sticky="W", padx=10, pady=5)
     toggle_raw_plot.grid(row=1, column=3, sticky="W", padx=10, pady=5)
     toggle_acg_plot.grid(row=1, column=4, sticky="W", padx=10, pady=5)
+    pair_lookup_button.grid(row=1, column=5, sticky="W", padx=10, pady=5)
 
     # Create visual legend plots outside plots
     global unit_legend_plot
@@ -571,6 +539,10 @@ def process_info_for_GUI(
     channel_pos_in,
     clus_info_in,
     param_in,
+    automatic_matches_in=None,
+    match_mode="or",
+    review_threshold_margin=0.1,
+    raw_output_in=None,
 ):
     """
     This function:
@@ -603,6 +575,12 @@ def process_info_for_GUI(
     global match_threshold
     global within_session
     global channel_pos
+    global review_matches
+    global automatic_match_pairs
+    global automatic_candidate_pairs
+    global automatic_match_mode
+    global review_threshold
+    global raw_output
 
     amplitude = amplitude_in
     spatial_decay = spatial_decay_in
@@ -615,10 +593,25 @@ def process_info_for_GUI(
     waveform = waveform_in
     clus_info = clus_info_in
     session_switch = clus_info["session_switch"]
+    if "session_indices" not in clus_info:
+        clus_info["session_indices"] = np.searchsorted(
+            np.asarray(session_switch)[1:],
+            np.arange(len(clus_info["original_ids"])),
+            side="right",
+        )
     param = param_in
     match_threshold = match_threshold_in
     within_session = within_session_in
     channel_pos = channel_pos_in
+    automatic_match_mode = match_mode.lower()
+    if automatic_match_mode not in {"and", "or"}:
+        raise ValueError("match_mode must be 'and' or 'or'")
+    if review_threshold_margin < 0:
+        raise ValueError("review_threshold_margin must be non-negative")
+    review_threshold = max(0, match_threshold - review_threshold_margin)
+    raw_output = output if raw_output_in is None else np.asarray(raw_output_in)
+    if raw_output.shape != output.shape:
+        raise ValueError("raw_output_in must have the same shape as output")
 
     output_threshold = np.zeros_like(output)
     output_threshold[output > match_threshold] = 1
@@ -627,50 +620,17 @@ def process_info_for_GUI(
         output_threshold == 1
     )  # need all matches including same session for GUI
 
-    # for the code it is helpful for matches to contain both (session 1, session 2) and (session 2, session 1)
-    # so when changing Unit A/B session it can find matches for all permutations
-    matches_12_part_1 = np.argwhere(np.tril(output) > match_threshold)
-    matches_12_part_2 = np.argwhere(np.tril(output).T > match_threshold)
-    matches_12 = np.unique(
-        np.concatenate((matches_12_part_1, matches_12_part_2)), axis=0
-    )
-
-    matches_21_part_1 = np.argwhere(np.triu(output) > match_threshold)
-    matches_21_part_2 = np.argwhere(np.triu(output).T > match_threshold)
-    matches_21 = np.unique(
-        np.concatenate((matches_21_part_1, matches_21_part_2)), axis=0
-    )
-
-    matches_GUI = [matches_12, matches_21]
-
-    output_GUI1_part_1 = np.tril(output)
-    output_GUI1_part_2 = np.tril(output).T
-    np.fill_diagonal(output_GUI1_part_2, 0)
-    output_GUI1 = output_GUI1_part_1 + output_GUI1_part_2
-
-    output_GUI2_part_1 = np.triu(output)
-    output_GUI2_part_2 = np.triu(output).T
-    np.fill_diagonal(output_GUI2_part_2, 0)
-    output_GUI2 = output_GUI2_part_1 + output_GUI2_part_2
-
-    output_GUI = [output_GUI1, output_GUI2]
-
-    scores_to_include_GUI = []
-    scores_to_include_12 = {}
-    scores_to_include_21 = {}
-    for key, value in scores_to_include.items():
-        tmp1 = np.tril(value)
-        tmp2 = np.tril(value).T
-        np.fill_diagonal(tmp2, 0)
-
-        tmp3 = np.triu(value)
-        tmp4 = np.triu(value).T
-        np.fill_diagonal(tmp4, 0)
-
-        scores_to_include_12[key] = tmp1 + tmp2
-        scores_to_include_21[key] = tmp3 + tmp4
-
-    scores_to_include_GUI = [scores_to_include_12, scores_to_include_21]
+    # Matrix [A, B] compares Unit A half 1 with Unit B half 2.
+    # Its transpose is the reciprocal comparison, A half 2 with B half 1.
+    output_GUI = [output, output.T]
+    matches_GUI = [
+        np.argwhere(output_GUI[0] > match_threshold),
+        np.argwhere(output_GUI[1] > match_threshold),
+    ]
+    scores_to_include_GUI = [
+        scores_to_include,
+        {key: value.T for key, value in scores_to_include.items()},
+    ]
 
     # getting avg CV data
     # for the Scores where can do (X + X.T)/2 and take upper triangular part
@@ -681,6 +641,34 @@ def process_info_for_GUI(
         scores_to_include_avg[key] = (value + value.T) / 2
 
     output_avg = (output_GUI[0] + output_GUI[1]) / 2
+    cv_12_matches = output_GUI[0] > match_threshold
+    cv_21_matches = output_GUI[1] > match_threshold
+    if automatic_match_mode == "or":
+        automatic_candidate_mask = cv_12_matches | cv_21_matches
+    else:
+        automatic_candidate_mask = cv_12_matches & cv_21_matches
+    automatic_candidate_pairs = set(
+        map(tuple, np.argwhere(automatic_candidate_mask))
+    )
+    if automatic_matches_in is None:
+        automatic_matches_in = np.argwhere(automatic_candidate_mask)
+
+    automatic_matches_in = np.asarray(automatic_matches_in, dtype=int).reshape(-1, 2)
+    automatic_match_pairs = set()
+    for unit_a, unit_b in automatic_matches_in:
+        automatic_match_pairs.add((int(unit_a), int(unit_b)))
+        automatic_match_pairs.add((int(unit_b), int(unit_a)))
+    review_matches = np.argwhere(
+        (output_GUI[0] >= review_threshold)
+        | (output_GUI[1] >= review_threshold)
+    )
+    review_match_scores = output_avg[
+        review_matches[:, 0],
+        review_matches[:, 1],
+    ]
+    review_matches = review_matches[
+        np.argsort(-review_match_scores, kind="stable")
+    ]
 
     matches_avg_part_1 = np.argwhere(output_avg > match_threshold)
     matches_avg_part_2 = np.argwhere(output_avg.T > match_threshold)
@@ -696,6 +684,94 @@ def process_info_for_GUI(
     avg_waveform_per_tp_avg = np.mean(avg_waveform_per_tp, axis=-1)
 
 
+def get_ranked_unit_a_options(session_a, session_b):
+    """Return one best-average partner per union-eligible Unit A."""
+    pairs = review_matches[
+        (session_switch[session_a - 1] <= review_matches[:, 0])
+        & (review_matches[:, 0] < session_switch[session_a])
+        & (session_switch[session_b - 1] <= review_matches[:, 1])
+        & (review_matches[:, 1] < session_switch[session_b])
+    ]
+    options = []
+    seen_unit_a = set()
+    for unit_a, unit_b in pairs:
+        unit_a = int(unit_a)
+        if unit_a not in seen_unit_a:
+            options.append([unit_a, int(unit_b)])
+            seen_unit_a.add(unit_a)
+    if not options:
+        raise ValueError(
+            f"No above-threshold candidates connect sessions "
+            f"{session_a} and {session_b}"
+        )
+    return options
+
+
+def get_ranked_unit_b_options(unit_a, session_b):
+    session_start = session_switch[session_b - 1]
+    session_stop = session_switch[session_b]
+    relative_order = np.argsort(
+        -output_avg[unit_a, session_start:session_stop],
+        kind="stable",
+    )
+    return (relative_order + session_start).tolist()
+
+
+def get_unit_a_display_options():
+    display_options = []
+    for unit_a, unit_b in option_a:
+        session_b = np.searchsorted(session_switch, unit_b, side="right")
+        session_start = session_switch[session_b - 1]
+        session_stop = session_switch[session_b]
+        match_count = sum(
+            (unit_a, candidate_b) in automatic_candidate_pairs
+            for candidate_b in range(session_start, session_stop)
+        )
+        display_options.append(f"{unit_a} ({match_count}) {unit_b}")
+    return display_options
+
+
+def color_unit_a_options(event=None):
+    """Color Unit A candidates by the displayed automatic decision."""
+    try:
+        popdown = entry_a.tk.call("ttk::combobox::PopdownWindow", entry_a)
+        listbox = f"{popdown}.f.l"
+        for index, pair in enumerate(option_a):
+            unit_a, unit_b = pair
+            is_automatic_match = (unit_a, unit_b) in automatic_match_pairs
+            foreground = APPROVED_MATCH_COLOR if is_automatic_match else "#E53935"
+            entry_a.tk.call(
+                listbox,
+                "itemconfigure",
+                index,
+                "-foreground",
+                foreground,
+            )
+    except TclError:
+        pass
+
+    try:
+        unit_a = int(entry_a.get().split()[0])
+        unit_b = int(entry_b.get())
+        is_automatic_match = (unit_a, unit_b) in automatic_match_pairs
+        style_name = (
+            "AutomaticMatch.TCombobox"
+            if is_automatic_match
+            else "AutomaticNonMatch.TCombobox"
+        )
+        entry_a.configure(style=style_name)
+    except (TclError, ValueError):
+        pass
+
+
+def enable_unit_a_review_colors():
+    style = ttk.Style(root)
+    style.configure("AutomaticMatch.TCombobox", foreground=APPROVED_MATCH_COLOR)
+    style.configure("AutomaticNonMatch.TCombobox", foreground="#E53935")
+    entry_a.configure(postcommand=color_unit_a_options)
+    root.after_idle(color_unit_a_options)
+
+
 def create_unit_legend():
     """Create visual legend for unit colors"""
     global unit_legend_plot
@@ -707,10 +783,10 @@ def create_unit_legend():
     ax.set_facecolor("#33393b")
 
     # Draw legend lines and text
-    ax.plot([0, 0.15], [0.5, 0.5], "g-", lw=3)
+    ax.plot([0, 0.15], [0.5, 0.5], color=UNIT_A_COLOR, lw=3)
     ax.text(0.18, 0.5, "Unit A", color="white", fontsize=12, va="center")
 
-    ax.plot([0.6, 0.75], [0.5, 0.5], "b-", lw=3)
+    ax.plot([0.6, 0.75], [0.5, 0.5], color=UNIT_B_COLOR, lw=3)
     ax.text(0.78, 0.5, "Unit B", color="white", fontsize=12, va="center")
 
     ax.set_xlim(0, 1.2)
@@ -733,10 +809,15 @@ def create_hist_legend():
     ax.set_facecolor("#33393b")
 
     # Draw legend elements
-    ax.plot([0, 0.1], [0.5, 0.5], "orange", lw=3)
+    ax.plot([0, 0.1], [0.5, 0.5], color=ALL_SCORES_COLOR, lw=3)
     ax.text(0.12, 0.5, "All scores", color="white", fontsize=10, va="center")
 
-    ax.plot([0.35, 0.45], [0.5, 0.5], "magenta", lw=3)
+    ax.plot(
+        [0.35, 0.45],
+        [0.5, 0.5],
+        color=APPROVED_MATCH_COLOR,
+        lw=3,
+    )
     ax.text(0.47, 0.5, "Expected matches", color="white", fontsize=10, va="center")
 
     ax.plot([0.75, 0.85], [0.5, 0.5], "white", lw=2, linestyle="--")
@@ -819,7 +900,7 @@ def plot_acgs(unit_a, unit_b):
     global acg_cache
 
     # Destroy existing plot
-    if "acg_plot" in globals() and acg_plot.winfo_exists():
+    if "acg_plot" in globals() and _widget_exists(acg_plot):
         acg_plot.destroy()
 
     # Create figure for single overlaid ACG plot
@@ -855,7 +936,7 @@ def plot_acgs(unit_a, unit_b):
             ax.plot(
                 positive_centers,
                 positive_autocorr,
-                color="green",
+                color=UNIT_A_COLOR,
                 linewidth=2,
                 alpha=0.8,
                 label=f"Unit A ({unit_a})",
@@ -885,7 +966,7 @@ def plot_acgs(unit_a, unit_b):
             ax.plot(
                 positive_centers,
                 positive_autocorr,
-                color="blue",
+                color=UNIT_B_COLOR,
                 linewidth=2,
                 alpha=0.8,
                 label=f"Unit B ({unit_b})",
@@ -933,11 +1014,19 @@ def plot_acgs(unit_a, unit_b):
         ax.set_ylim(0, 1)
         ax.axis("off")
 
-    # Create canvas and position to the right of waveform plot
+    # Create canvas below the position/trajectory plot.
     acg_canvas = FigureCanvasTkAgg(fig, master=root)
     acg_canvas.draw()
     acg_plot = acg_canvas.get_tk_widget()
-    acg_plot.grid(row=3, column=3, rowspan=2, padx=5, pady=5, sticky="nsew")
+    acg_plot.grid(
+        row=4,
+        column=1,
+        columnspan=2,
+        rowspan=2,
+        padx=5,
+        pady=5,
+        sticky="nsew",
+    )
 
 
 def get_spike_times_for_unit(unit_id):
@@ -1080,6 +1169,33 @@ def update(event):
     else:
         if "acg_plot" in globals() and acg_plot.winfo_exists() == 1:
             acg_plot.destroy()
+    install_navigation_bindtags(root)
+
+
+def _install_unit_b_popdown_navigation():
+    try:
+        popdown = str(root.tk.call("ttk::combobox::PopdownWindow", entry_b))
+        listbox = f"{popdown}.f.l"
+        bindtags = tuple(root.tk.splitlist(root.tk.call("bindtags", listbox)))
+    except TclError:
+        return
+    if "UnitMatchNavigation" not in bindtags:
+        root.tk.call(
+            "bindtags",
+            listbox,
+            ("UnitMatchNavigation", *bindtags),
+        )
+
+
+def _close_unit_b_dropdown():
+    try:
+        root.tk.call("ttk::combobox::Unpost", entry_b)
+    except TclError:
+        pass
+
+
+def select_unit_b(unit_id):
+    entry_b.current(option_b.index(int(unit_id)))
 
 
 def up_options_b_list(event):
@@ -1090,26 +1206,15 @@ def up_options_b_list(event):
     global option_b
     global entry_b
 
+    _close_unit_b_dropdown()
     tmp_entry_b = int(entry_b.get())
-
-    tmp_list = np.asarray(option_b)
-    current_idx = int(np.argwhere(tmp_list == tmp_entry_b))
+    current_idx = option_b.index(tmp_entry_b)
     if current_idx == 0:
-        return
-    else:
-        current_idx -= 1
-        if entry_b.winfo_exists() == 1:
-            entry_b.destroy()
+        return "break"
 
-    new_entry_b = tmp_list[current_idx]
-
-    entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(new_entry_b)
-    entry_b.bind("<<ComboboxSelected>>", update)
-
-    entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
-
+    entry_b.current(current_idx - 1)
     update(event)
+    return "break"
 
 
 def down_options_b_list(event):
@@ -1120,26 +1225,33 @@ def down_options_b_list(event):
     global option_b
     global entry_b
 
+    _close_unit_b_dropdown()
     tmp_entry_b = int(entry_b.get())
+    current_idx = option_b.index(tmp_entry_b)
+    if current_idx == (len(option_b) - 1):
+        return "break"
 
-    tmp_list = np.asarray(option_b)
-    current_idx = int(np.argwhere(tmp_list == tmp_entry_b))
-    if current_idx == (len(tmp_list) - 1):
-        return
-    else:
-        current_idx += 1
-        if entry_b.winfo_exists() == 1:
-            entry_b.destroy()
-
-    new_entry_b = tmp_list[current_idx]
-
-    entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(new_entry_b)
-    entry_b.bind("<<ComboboxSelected>>", update)
-
-    entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
-
+    entry_b.current(current_idx + 1)
     update(event)
+    return "break"
+
+
+def bind_unit_b_navigation():
+    root.bind_class("UnitMatchNavigation", "<Up>", up_options_b_list)
+    root.bind_class("UnitMatchNavigation", "<Down>", down_options_b_list)
+    root.bind_class("UnitMatchNavigation", "<Right>", next_pair)
+    root.bind_class("UnitMatchNavigation", "<Left>", previous_pair)
+    entry_b.configure(postcommand=_install_unit_b_popdown_navigation)
+    entry_b.bind("<<ComboboxSelected>>", update)
+    install_navigation_bindtags(root)
+
+
+def install_navigation_bindtags(widget):
+    bindtags = widget.bindtags()
+    if "UnitMatchNavigation" not in bindtags:
+        widget.bindtags(("UnitMatchNavigation", *bindtags))
+    for child in widget.winfo_children():
+        install_navigation_bindtags(child)
 
 
 # sort CV function as to be calleed as part of update
@@ -1171,6 +1283,7 @@ def update_unit_cv():
     global entry_a
     global entry_b
     global option_a
+    global option_b
     global session_entry_a
     global session_entry_b
     global match_idx
@@ -1188,76 +1301,20 @@ def update_unit_cv():
     if entry_b.winfo_exists() == 1:
         entry_b.destroy()
 
-    CV = get_cv_option()
-    CV_option = CV_tkinter.get() - 1  # want 0 for cv (1,2) , want 1 for cv (2,1)
-    if CV == "Avg":
-        # Use average CV values
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_a - 1] <= matches_avg[:, 0])
-            * (matches_avg[:, 0] < session_switch[session_a])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_b - 1] <= matches_avg[:, 1])
-            * (matches_avg[:, 1] < session_switch[session_b])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-        option_a = matches_avg[tmp_idx_a[in_both], :].tolist()
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(entry_a_tmp)
-
-        option_b = np.flip(
-            np.argsort(
-                output_avg[
-                    int(entry_a.get()),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
-
-    else:
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_a - 1] <= matches_GUI[CV_option][:, 0])
-            * (matches_GUI[CV_option][:, 0] < session_switch[session_a])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_b - 1] <= matches_GUI[CV_option][:, 1])
-            * (matches_GUI[CV_option][:, 1] < session_switch[session_b])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-
-        # So is orderby unit A
-        option_a = matches_GUI[CV_option][tmp_idx_a[in_both], :].tolist()
-        if CV_option == 0:
-            option_a = sorted(option_a)
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(entry_a_tmp)
-
-        ##NOT SORTED FOR CV
-        option_b = np.flip(
-            np.argsort(
-                output_GUI[CV_option][
-                    int(entry_a.get()),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
+    option_a = get_ranked_unit_a_options(session_a, session_b)
+    entry_a = ttk.Combobox(
+        entry_frame, values=get_unit_a_display_options(), width=18
+    )
+    entry_a.set(entry_a_tmp)
+    option_b = get_ranked_unit_b_options(int(entry_a.get()), session_b)
 
     ##################
     entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(entry_b_tmp)
+    select_unit_b(entry_b_tmp)
 
     entry_a.bind("<<ComboboxSelected>>", update_units)
-    entry_b.bind("<<ComboboxSelected>>", update)
+    enable_unit_a_review_colors()
+    bind_unit_b_navigation()
     entry_a.grid(row=2, column=1, columnspan=2, stick="WE", padx=5)
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
 
@@ -1281,11 +1338,15 @@ def update_unit_entryA(event):
     global entry_a
     global entry_b
     global option_a
+    global option_b
     global match_idx
     global session_entry_b
 
     session_a = int(session_entry_a.get())
     session_b = int(session_entry_b.get())
+    if session_a == session_b and param["n_sessions"] > 1:
+        session_b = session_a % param["n_sessions"] + 1
+        session_entry_b.set(session_b)
     EntryBtmp = int(entry_b.get())
 
     if entry_a.winfo_exists() == 1:
@@ -1293,71 +1354,18 @@ def update_unit_entryA(event):
     if entry_b.winfo_exists() == 1:
         entry_b.destroy()
 
-    CV = get_cv_option()
-    cv_option = CV_tkinter.get() - 1  # want 0 for cv (1,2) , want 1 for cv (2,1)
-    if CV == "Avg":
-        # Use average CV values
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_a - 1] <= matches_avg[:, 0])
-            * (matches_avg[:, 0] < session_switch[session_a])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_b - 1] <= matches_avg[:, 1])
-            * (matches_avg[:, 1] < session_switch[session_b])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-        option_a = matches_avg[tmp_idx_a[in_both], :].tolist()
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(option_a[0][0])
-
-        option_b = np.flip(
-            np.argsort(
-                output_avg[
-                    int(entry_a.get()),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
-
-    else:
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_a - 1] <= matches_GUI[cv_option][:, 0])
-            * (matches_GUI[cv_option][:, 0] < session_switch[session_a])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_b - 1] <= matches_GUI[cv_option][:, 1])
-            * (matches_GUI[cv_option][:, 1] < session_switch[session_b])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-        option_a = matches_GUI[cv_option][tmp_idx_a[in_both], :].tolist()
-        if cv_option == 0:
-            option_a = sorted(option_a)
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(option_a[0][0])
-
-        option_b = np.flip(
-            np.argsort(
-                output_GUI[cv_option][
-                    int(entry_a.get()),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
+    option_a = get_ranked_unit_a_options(session_a, session_b)
+    entry_a = ttk.Combobox(
+        entry_frame, values=get_unit_a_display_options(), width=18
+    )
+    entry_a.set(option_a[0][0])
+    option_b = get_ranked_unit_b_options(int(entry_a.get()), session_b)
     ##################
     entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(EntryBtmp)
+    select_unit_b(EntryBtmp if EntryBtmp in option_b else option_b[0])
     entry_a.bind("<<ComboboxSelected>>", update_units)
-    entry_b.bind("<<ComboboxSelected>>", update)
+    enable_unit_a_review_colors()
+    bind_unit_b_navigation()
 
     entry_a.grid(row=2, column=1, columnspan=2, stick="WE", padx=5)
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
@@ -1379,11 +1387,15 @@ def update_unit_entryB(event):
     global entry_a
     global entry_b
     global option_a
+    global option_b
     global match_idx
     global session_entry_a
 
     session_a = int(session_entry_a.get())
     session_b = int(session_entry_b.get())
+    if session_a == session_b and param["n_sessions"] > 1:
+        session_a = session_b % param["n_sessions"] + 1
+        session_entry_a.set(session_a)
     entry_a_tmp = int(entry_a.get())
 
     if entry_a.winfo_exists() == 1:
@@ -1391,72 +1403,20 @@ def update_unit_entryB(event):
     if entry_b.winfo_exists() == 1:
         entry_b.destroy()
 
-    CV = get_cv_option()
-    CV_option = CV_tkinter.get() - 1  # want 0 for cv (1,2) , want 1 for cv (2,1)
-    if CV == "Avg":
-        # Use average CV values
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_a - 1] <= matches_avg[:, 0])
-            * (matches_avg[:, 0] < session_switch[session_a])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_b - 1] <= matches_avg[:, 1])
-            * (matches_avg[:, 1] < session_switch[session_b])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-        option_a = matches_avg[tmp_idx_a[in_both], :].tolist()
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(entry_a_tmp)
-
-        option_b = np.flip(
-            np.argsort(
-                output_avg[
-                    int(entry_a.get()),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
-
-    else:
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_a - 1] <= matches_GUI[CV_option][:, 0])
-            * (matches_GUI[CV_option][:, 0] < session_switch[session_a])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_b - 1] <= matches_GUI[CV_option][:, 1])
-            * (matches_GUI[CV_option][:, 1] < session_switch[session_b])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-        option_a = matches_GUI[CV_option][tmp_idx_a[in_both], :].tolist()
-        if CV_option == 0:
-            option_a = sorted(option_a)
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(entry_a_tmp)
-
-        option_b = np.flip(
-            np.argsort(
-                output_GUI[CV_option][
-                    int(entry_a_tmp),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
+    option_a = get_ranked_unit_a_options(session_a, session_b)
+    entry_a = ttk.Combobox(
+        entry_frame, values=get_unit_a_display_options(), width=18
+    )
+    valid_unit_a_ids = {pair[0] for pair in option_a}
+    entry_a.set(entry_a_tmp if entry_a_tmp in valid_unit_a_ids else option_a[0][0])
+    option_b = get_ranked_unit_b_options(int(entry_a.get()), session_b)
 
     ##################
     entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(option_b[0])
+    entry_b.current(0)
     entry_a.bind("<<ComboboxSelected>>", update_units)
-    entry_b.bind("<<ComboboxSelected>>", update)
+    enable_unit_a_review_colors()
+    bind_unit_b_navigation()
 
     entry_a.grid(row=2, column=1, columnspan=2, stick="WE", padx=5)
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
@@ -1476,6 +1436,7 @@ def update_units(event):
     global entry_a
     global entry_b
     global option_a
+    global option_b
     global session_entry_b
 
     session_b = int(session_entry_b.get())
@@ -1483,40 +1444,17 @@ def update_units(event):
 
     if entry_b.winfo_exists() == 1:
         entry_b.destroy()
-    # selected is s string which is xxx yyy , where xxx and yyy are the two units seperates by a space
+    # The dropdown value is "UnitA (automatic match count) best-UnitB".
     tmpA = selected.split()[0]
-    tmpB = selected.split()[1]
+    tmpB = selected.split()[-1]
     entry_a.set(tmpA)
 
-    # need to make it so the list for B updates
-    CV = get_cv_option()
-    CV_option = CV_tkinter.get() - 1  # want 0 for cv (1,2) , want 1 for cv (2,1)
-    if CV == "Avg":
-        # Use average CV value
-        option_b = np.flip(
-            np.argsort(
-                output_avg[
-                    int(tmpA), session_switch[session_b - 1] : session_switch[session_b]
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
-    else:
-        option_b = np.flip(
-            np.argsort(
-                output_GUI[CV_option][
-                    int(tmpA), session_switch[session_b - 1] : session_switch[session_b]
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
+    option_b = get_ranked_unit_b_options(int(tmpA), session_b)
 
     ##################
     entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(tmpB)
-    entry_b.bind("<<ComboboxSelected>>", update)
+    entry_b.current(0)
+    bind_unit_b_navigation()
 
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
 
@@ -1537,51 +1475,28 @@ def next_pair(event):
     global entry_a
     global entry_b
     global option_a
+    global option_b
     global session_entry_b
 
     session_b = int(session_entry_b.get())
-    match_idx += 1
+    match_idx = (match_idx + 1) % len(option_a)
     tmp_a, tmp_b = option_a[match_idx]
     entry_a.set(tmp_a)
 
     if entry_b.winfo_exists() == 1:
         entry_b.destroy()
 
-    # Update B, and change it's dropbox
-    CV = get_cv_option()
-    cv_option = CV_tkinter.get() - 1  # want 0 for cv (1,2) , want 1 for cv (2,1)
-    if CV == "Avg":
-        # Use average CV value
-        option_b = np.flip(
-            np.argsort(
-                output_avg[
-                    int(tmp_a),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
-    else:
-        option_b = np.flip(
-            np.argsort(
-                output_GUI[cv_option][
-                    int(tmp_a),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
+    option_b = get_ranked_unit_b_options(int(tmp_a), session_b)
 
     ##################
     entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(tmp_b)
-    entry_b.bind("<<ComboboxSelected>>", update)
+    entry_b.current(0)
+    bind_unit_b_navigation()
 
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
 
     update(event)
+    return "break"
 
 
 def previous_pair(event):
@@ -1595,51 +1510,28 @@ def previous_pair(event):
     global entry_a
     global entry_b
     global option_a
+    global option_b
     global session_entry_b
 
     session_b = int(session_entry_b.get())
-    match_idx -= 1
+    match_idx = (match_idx - 1) % len(option_a)
     tmp_a, tmp_b = option_a[match_idx]
     entry_a.set(tmp_a)
 
     if entry_b.winfo_exists() == 1:
         entry_b.destroy()
 
-    # Update B, and change it's dropbox
-    CV = get_cv_option()
-    CV_option = CV_tkinter.get() - 1  # want 0 for cv (1,2) , want 1 for cv (2,1)
-    if CV == "Avg":
-        # Use average CV value
-        option_b = np.flip(
-            np.argsort(
-                output_avg[
-                    int(tmp_a),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
-    else:
-        option_b = np.flip(
-            np.argsort(
-                output_GUI[CV_option][
-                    int(tmp_a),
-                    session_switch[session_b - 1] : session_switch[session_b],
-                ]
-            )
-            + session_switch[session_b - 1]
-        )
-        option_b = option_b.tolist()
+    option_b = get_ranked_unit_b_options(int(tmp_a), session_b)
 
     ##################
     entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(tmp_b)
-    entry_b.bind("<<ComboboxSelected>>", update)
+    entry_b.current(0)
+    bind_unit_b_navigation()
 
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
 
     update(event)
+    return "break"
 
 
 def swap_units():
@@ -1650,6 +1542,7 @@ def swap_units():
     global session_entry_b
     global match_idx
     global option_a
+    global option_b
 
     # get all initial info
     entry_a_tmp = int(entry_a.get())
@@ -1667,77 +1560,20 @@ def swap_units():
     session_entry_a.set(session_b_tmp)
     session_entry_b.set(session_a_tmp)
 
-    # Update A and B dropsown boxs
-    CV = get_cv_option()
-    cv_option = CV_tkinter.get() - 1  # want 0 for cv (1,2) , want 1 for cv (2,1)
-    if CV == "Avg":
-        # Use average CV values
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_b_tmp - 1] <= matches_avg[:, 0])
-            * (matches_avg[:, 0] < session_switch[session_b_tmp])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_a_tmp - 1] <= matches_avg[:, 1])
-            * (matches_avg[:, 1] < session_switch[session_a_tmp])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-        option_a = matches_avg[tmp_idx_a[in_both], :].tolist()
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(entry_b_tmp)
-
-        option_b = np.flip(
-            np.argsort(
-                output_avg[
-                    int(entry_a.get()),
-                    session_switch[session_a_tmp - 1] : session_switch[session_a_tmp],
-                ]
-            )
-            + session_switch[session_a_tmp - 1]
-        )
-        option_b = option_b.tolist()
-
-    else:
-        tmp_idx_a = np.argwhere(
-            (session_switch[session_b_tmp - 1] <= matches_GUI[cv_option][:, 0])
-            * (matches_GUI[cv_option][:, 0] < session_switch[session_b_tmp])
-            == True
-        ).squeeze()
-        tmp_idx_b = np.argwhere(
-            (session_switch[session_a_tmp - 1] <= matches_GUI[cv_option][:, 1])
-            * (matches_GUI[cv_option][:, 1] < session_switch[session_a_tmp])
-            == True
-        ).squeeze()
-        in_both = np.isin(tmp_idx_a, tmp_idx_b)
-
-        # So is orderby unit A
-        option_a = matches_GUI[cv_option][tmp_idx_a[in_both], :].tolist()
-        if cv_option == 0:
-            option_a = sorted(option_a)
-
-        entry_a = ttk.Combobox(entry_frame, values=option_a, width=10)
-        entry_a.set(entry_b_tmp)
-
-        ##NOT SORTED FOR CV
-        option_b = np.flip(
-            np.argsort(
-                output_GUI[cv_option][
-                    int(entry_a.get()),
-                    session_switch[session_a_tmp - 1] : session_switch[session_a_tmp],
-                ]
-            )
-            + session_switch[session_a_tmp - 1]
-        )
-        option_b = option_b.tolist()
+    option_a = get_ranked_unit_a_options(session_b_tmp, session_a_tmp)
+    entry_a = ttk.Combobox(
+        entry_frame, values=get_unit_a_display_options(), width=18
+    )
+    entry_a.set(entry_b_tmp)
+    option_b = get_ranked_unit_b_options(int(entry_a.get()), session_a_tmp)
 
     ##################
     entry_b = ttk.Combobox(entry_frame, values=option_b, width=10)
-    entry_b.set(entry_a_tmp)
+    select_unit_b(entry_a_tmp)
 
     entry_a.bind("<<ComboboxSelected>>", update_units)
-    entry_b.bind("<<ComboboxSelected>>", update)
+    enable_unit_a_review_colors()
+    bind_unit_b_navigation()
     entry_a.grid(row=2, column=1, columnspan=2, stick="WE", padx=5)
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
 
@@ -1767,6 +1603,196 @@ def get_score_histograms(scores_to_include, output_threshold):
     return hist_names, hist, hist_matches
 
 
+def open_pair_lookup():
+    """Open a selectable unit-identity probability lookup window."""
+    global pair_lookup_window
+
+    existing_window = globals().get("pair_lookup_window")
+    if existing_window is not None and _widget_exists(existing_window):
+        pair_lookup_window.lift()
+        pair_lookup_window.focus_force()
+        return
+
+    if "session_indices" not in clus_info:
+        clus_info["session_indices"] = np.searchsorted(
+            np.asarray(clus_info["session_switch"])[1:],
+            np.arange(len(clus_info["original_ids"])),
+            side="right",
+        )
+
+    required_metadata = {"probe_numbers", "analyzer_unit_ids"}
+    missing_metadata = required_metadata.difference(clus_info)
+    if missing_metadata:
+        pair_lookup_window = Toplevel(root)
+        pair_lookup_window.title("Inspect UnitMatch Pair")
+        ttk.Label(
+            pair_lookup_window,
+            text=(
+                "Pair lookup metadata is unavailable. Rerun the Section 4 "
+                "scoring cell and the Section 5 GUI initialization cell.\n"
+                f"Missing: {sorted(missing_metadata)}"
+            ),
+            justify="left",
+            padding=12,
+        ).grid()
+        return
+
+    pair_lookup_window = Toplevel(root)
+    pair_lookup_window.title("Inspect UnitMatch Pair")
+    pair_lookup_window.resizable(False, False)
+
+    session_values = list(range(1, param["n_sessions"] + 1))
+    probe_values = sorted(
+        {int(probe_n) for probe_n in clus_info["probe_numbers"]}
+    )
+
+    try:
+        selected_row_a = int(entry_a.get().split()[0])
+        selected_row_b = int(entry_b.get())
+    except ValueError:
+        selected_row_a = 0
+        selected_row_b = min(1, len(clus_info["session_indices"]) - 1)
+
+    selected_rows = (selected_row_a, selected_row_b)
+    session_variables = []
+    probe_variables = []
+    unit_variables = []
+    for column, (unit_name, row_index) in enumerate(
+        zip(("Unit A", "Unit B"), selected_rows),
+        start=1,
+    ):
+        ttk.Label(
+            pair_lookup_window,
+            text=unit_name,
+            font=("DejaVu Sans", 11, "bold"),
+        ).grid(row=0, column=column, padx=8, pady=(8, 4))
+
+        session_variable = IntVar(
+            value=int(clus_info["session_indices"][row_index]) + 1
+        )
+        probe_variable = IntVar(
+            value=int(clus_info["probe_numbers"][row_index])
+        )
+        unit_variable = StringVar(
+            value=str(clus_info["analyzer_unit_ids"][row_index])
+        )
+        session_variables.append(session_variable)
+        probe_variables.append(probe_variable)
+        unit_variables.append(unit_variable)
+
+        ttk.Combobox(
+            pair_lookup_window,
+            values=session_values,
+            textvariable=session_variable,
+            state="readonly",
+            width=12,
+        ).grid(row=1, column=column, padx=8, pady=3)
+        ttk.Combobox(
+            pair_lookup_window,
+            values=probe_values,
+            textvariable=probe_variable,
+            state="readonly",
+            width=12,
+        ).grid(row=2, column=column, padx=8, pady=3)
+        ttk.Entry(
+            pair_lookup_window,
+            textvariable=unit_variable,
+            width=15,
+        ).grid(row=3, column=column, padx=8, pady=3)
+
+    for row, label_text in enumerate(
+        ("Session", "Probe", "Analyzer unit ID"),
+        start=1,
+    ):
+        ttk.Label(pair_lookup_window, text=label_text).grid(
+            row=row,
+            column=0,
+            sticky="e",
+            padx=(8, 4),
+            pady=3,
+        )
+
+    result_text = Text(
+        pair_lookup_window,
+        width=68,
+        height=9,
+        wrap="none",
+        borderwidth=2,
+        relief="groove",
+    )
+    result_text.grid(
+        row=5,
+        column=0,
+        columnspan=3,
+        padx=8,
+        pady=(6, 8),
+    )
+
+    def show_lookup_result(event=None):
+        result_text.configure(state="normal")
+        result_text.delete("1.0", END)
+        try:
+            sessions = [variable.get() - 1 for variable in session_variables]
+            probes = [variable.get() for variable in probe_variables]
+            unit_ids = [int(variable.get()) for variable in unit_variables]
+            if probes[0] != probes[1]:
+                raise ValueError(
+                    "Units on different probes are not valid UnitMatch pairs."
+                )
+
+            matrix_rows = []
+            for session_index, probe_n, unit_id in zip(
+                sessions,
+                probes,
+                unit_ids,
+            ):
+                matches = np.flatnonzero(
+                    (clus_info["session_indices"] == session_index)
+                    & (clus_info["probe_numbers"] == probe_n)
+                    & (clus_info["analyzer_unit_ids"] == unit_id)
+                )
+                if matches.size == 0:
+                    raise ValueError(
+                        f"Unit {unit_id} was not exported from "
+                        f"Session {session_index + 1}, probe{probe_n}."
+                    )
+                if matches.size > 1:
+                    raise RuntimeError(
+                        f"Unit {unit_id} maps to multiple matrix rows: "
+                        f"{matches.tolist()}."
+                    )
+                matrix_rows.append(int(matches[0]))
+
+            row_a, row_b = matrix_rows
+            probability_12 = raw_output[row_a, row_b]
+            probability_21 = raw_output[row_b, row_a]
+            average_probability = (probability_12 + probability_21) / 2
+            result = (
+                f"Matrix rows: A={row_a}, B={row_b}\n"
+                f"CV (A1, B2): {probability_12:.5f}\n"
+                f"CV (A2, B1): {probability_21:.5f}\n"
+                f"Average: {average_probability:.5f}\n"
+                f"Either direction above {match_threshold:.5f}: "
+                f"{max(probability_12, probability_21) > match_threshold}\n"
+                f"Both directions above {match_threshold:.5f}: "
+                f"{min(probability_12, probability_21) > match_threshold}"
+            )
+        except (KeyError, RuntimeError, TypeError, ValueError) as error:
+            result = f"Cannot inspect pair: {error}"
+
+        result_text.insert("1.0", result)
+        result_text.configure(state="disabled")
+        return "break"
+
+    ttk.Button(
+        pair_lookup_window,
+        text="Show probabilities",
+        command=show_lookup_result,
+    ).grid(row=4, column=0, columnspan=3, pady=(7, 3))
+    pair_lookup_window.bind("<Return>", show_lookup_result)
+    show_lookup_result()
+
+
 def add_original_ID(UnitA, UnitB):
     global original_id_label
     global root
@@ -1776,21 +1802,45 @@ def add_original_ID(UnitA, UnitB):
         original_id_label.destroy()
 
     try:
-        original_id_a = int(clus_info["original_ids"][UnitA].squeeze())
-        original_id_b = int(clus_info["original_ids"][UnitB].squeeze())
-        original_id_label = ttk.Label(
-            root,
-            text=f"The Original Unit IDs are:\nUnit A: {original_id_a}   Unit B: {original_id_b}",
-            borderwidth=2,
-            relief="groove",
-        )
+        export_id_a = int(clus_info["original_ids"][UnitA].squeeze())
+        export_id_b = int(clus_info["original_ids"][UnitB].squeeze())
+        if "probe_numbers" in clus_info and "analyzer_unit_ids" in clus_info:
+            probe_a = int(clus_info["probe_numbers"][UnitA])
+            probe_b = int(clus_info["probe_numbers"][UnitB])
+            analyzer_id_a = clus_info["analyzer_unit_ids"][UnitA]
+            analyzer_id_b = clus_info["analyzer_unit_ids"][UnitB]
+            identity_rows = (
+                f"Unit A: probe{probe_a}, analyzer unit {analyzer_id_a} "
+                f"(export ID {export_id_a})",
+                f"Unit B: probe{probe_b}, analyzer unit {analyzer_id_b} "
+                f"(export ID {export_id_b})",
+            )
+        else:
+            identity_rows = (
+                f"Unit A: export ID {export_id_a}",
+                f"Unit B: export ID {export_id_b}",
+            )
+        original_id_label = ttk.LabelFrame(root, text="Unit identities")
+        for row, identity_text in enumerate(identity_rows):
+            identity_entry = ttk.Entry(original_id_label, width=58)
+            identity_entry.insert(0, identity_text)
+            identity_entry.configure(state="readonly")
+            identity_entry.grid(row=row, column=0, sticky="ew", padx=5, pady=2)
+        original_id_label.columnconfigure(0, weight=1)
     except IndexError as e:
         print(f"Error: {e}")
         original_id_label = ttk.Label(
             root, text="Error: Unit ID out of bounds", borderwidth=2, relief="groove"
         )
 
-    original_id_label.grid(row=2, column=2, ipadx=5, ipady=5)
+    original_id_label.grid(
+        row=2,
+        column=1,
+        sticky="w",
+        padx=(5, 15),
+        ipadx=5,
+        ipady=5,
+    )
 
 
 def add_probability_label(UnitA, UnitB, CVoption):
@@ -1800,39 +1850,80 @@ def add_probability_label(UnitA, UnitB, CVoption):
         bayes_label.destroy()
 
     if CVoption == -1:
-        bayes_label = ttk.Label(
-            root,
-            text=f"The UM probabilty for this match is:\n {np.round(output_avg[UnitA, UnitB], 5)}",
-            borderwidth=2,
-            relief="groove",
+        probability = output_avg[UnitA, UnitB]
+        probability_text = (
+            f"Average probability: {probability:.5f}\n"
+            f"CV (1,2): {output_GUI[0][UnitA, UnitB]:.5f}\n"
+            f"CV (2,1): {output_GUI[1][UnitA, UnitB]:.5f}"
         )
-        bayes_label.grid(row=2, column=1, ipadx=5, ipady=5)
     else:
-        bayes_label = ttk.Label(
-            root,
-            text=f"The UM probabilty for this match is:\n {np.round(output_GUI[CVoption][UnitA, UnitB], 5)}",
-            borderwidth=2,
-            relief="groove",
-        )
-        bayes_label.grid(row=2, column=1, ipadx=5, ipady=5)
+        probability = output_GUI[CVoption][UnitA, UnitB]
+        probability_text = f"UnitMatch probability: {probability:.5f}"
+
+    is_automatic_match = (UnitA, UnitB) in automatic_match_pairs
+    status = "MATCH" if is_automatic_match else "NOT MATCH"
+    status_color = APPROVED_MATCH_COLOR if is_automatic_match else "red"
+    pair = [UnitA, UnitB]
+    if pair in not_match:
+        manual_status = "NON MATCH"
+        label_color = "red"
+    elif pair in is_match:
+        manual_status = "MATCH"
+        label_color = APPROVED_MATCH_COLOR
+    else:
+        manual_status = "UNREVIEWED"
+        label_color = status_color
+    bayes_label = ttk.Label(
+        root,
+        text=(
+            f"{probability_text}\n"
+            f"Threshold: {match_threshold:.5f}\n"
+            f"Automatic {automatic_match_mode.upper()} decision: {status}\n"
+            f"Manual decision: {manual_status}"
+        ),
+        foreground=label_color,
+        borderwidth=2,
+        relief="groove",
+        justify="center",
+        anchor="center",
+        width=42,
+    )
+    bayes_label.grid(
+        row=2,
+        column=2,
+        sticky="w",
+        padx=(15, 5),
+        ipadx=10,
+        ipady=10,
+    )
 
 
 def set_match(event=None):
     global is_match
-    unit_a = int(entry_a.get())
-    unit_b = int(entry_b.get())
-
-    is_match.append([unit_a, unit_b])
-    is_match.append([unit_b, unit_a])
-
-
-def set_not_match(event=None):
     global not_match
     unit_a = int(entry_a.get())
     unit_b = int(entry_b.get())
 
-    not_match.append([unit_a, unit_b])
-    not_match.append([unit_b, unit_a])
+    pairs = [[unit_a, unit_b], [unit_b, unit_a]]
+    not_match[:] = [pair for pair in not_match if pair not in pairs]
+    for pair in pairs:
+        if pair not in is_match:
+            is_match.append(pair)
+    add_probability_label(unit_a, unit_b, CV_tkinter.get() - 1)
+
+
+def set_not_match(event=None):
+    global is_match
+    global not_match
+    unit_a = int(entry_a.get())
+    unit_b = int(entry_b.get())
+
+    pairs = [[unit_a, unit_b], [unit_b, unit_a]]
+    is_match[:] = [pair for pair in is_match if pair not in pairs]
+    for pair in pairs:
+        if pair not in not_match:
+            not_match.append(pair)
+    add_probability_label(unit_a, unit_b, CV_tkinter.get() - 1)
 
 
 def MakeTable(table):
@@ -1844,7 +1935,7 @@ def MakeTable(table):
     total_rows = len(table)
     total_columns = len(table[0])
 
-    colors = ["black", "green", "blue"]
+    colors = ["black", UNIT_A_COLOR, UNIT_B_COLOR]
     frame_table = ttk.LabelFrame(root, text="UnitData")
     for i in range(total_rows):
         for j in range(total_columns):
@@ -1852,7 +1943,7 @@ def MakeTable(table):
             e.insert(END, table[i][j])
             e.configure(state="readonly")
             e.grid(row=i, column=j)
-    frame_table.grid(row=4, column=0, padx=10, pady=10)
+    frame_table.grid(row=4, column=0, padx=10, pady=10, sticky="nw")
 
 
 # get table data #ADD STABILTY - prob of unit with itself accros cv
@@ -1995,7 +2086,7 @@ def make_unit_score_table(table):
             e.configure(state="readonly")
             e.grid(row=i, column=j)
 
-    score_table.grid(row=5, column=0, columnspan=2, padx=10, pady=10)
+    score_table.grid(row=5, column=0, padx=10, pady=10, sticky="nw")
 
 
 def plot_avg_waveforms(UnitA, UnitB, CV):
@@ -2014,16 +2105,32 @@ def plot_avg_waveforms(UnitA, UnitB, CV):
     plt1.xaxis.set_label_coords(0.9, 0)
 
     if CV == "Avg":
-        plt1.plot(avg_waveform_avg[:, UnitA], "g", label=f"Unit A ({UnitA})")
-        plt1.plot(avg_waveform_avg[:, UnitB], "b", label=f"Unit B ({UnitB})")
+        plt1.plot(
+            avg_waveform_avg[:, UnitA],
+            color=UNIT_A_COLOR,
+            label=f"Unit A ({UnitA})",
+        )
+        plt1.plot(
+            avg_waveform_avg[:, UnitB],
+            color=UNIT_B_COLOR,
+            label=f"Unit B ({UnitB})",
+        )
         plt1.set_xlabel("Time (ms)")
         plt1.set_ylabel("Amplitude (µV)")
         # plt1.set_xlim(left = 0)
         # plt1.set_xticks([])
 
     else:
-        plt1.plot(avg_waveform[:, UnitA, CV[0]], "g", label=f"Unit A ({UnitA})")
-        plt1.plot(avg_waveform[:, UnitB, CV[1]], "b", label=f"Unit B ({UnitB})")
+        plt1.plot(
+            avg_waveform[:, UnitA, CV[0]],
+            color=UNIT_A_COLOR,
+            label=f"Unit A ({UnitA})",
+        )
+        plt1.plot(
+            avg_waveform[:, UnitB, CV[1]],
+            color=UNIT_B_COLOR,
+            label=f"Unit B ({UnitB})",
+        )
         plt1.set_xlabel("Time (ms)")
         plt1.set_ylabel("Amplitude (µV)")
         # plt1.set_xlim(left = 0)
@@ -2039,12 +2146,12 @@ def plot_trajectories(UnitA, UnitB, CV):
     if trajectory_plot.winfo_exists() == 1:
         trajectory_plot.destroy()
 
-    fig = Figure(figsize=(3, 3), dpi=100)
+    fig = Figure(figsize=(4, 4), dpi=100, layout="constrained")
     fig.patch.set_facecolor("#33393b")
 
     plt2 = fig.add_subplot(111)
     plt2.patch.set_facecolor("#2d2d2d")
-    plt2.set_aspect(0.5)
+    plt2.set_aspect("auto")
     plt2.spines[["right", "top"]].set_visible(False)
 
     if CV == "Avg":
@@ -2052,18 +2159,26 @@ def plot_trajectories(UnitA, UnitB, CV):
         plt2.plot(
             avg_waveform_per_tp_avg[1, UnitA, wave_idx[UnitA, :, 0].astype(bool)],
             avg_waveform_per_tp_avg[2, UnitA, wave_idx[UnitA, :, 0].astype(bool)],
-            "g",
+            color=UNIT_A_COLOR,
             label=f"Unit A ({UnitA})",
         )
-        plt2.scatter(avg_centroid_avg[1, UnitA], avg_centroid_avg[2, UnitA], c="g")
+        plt2.scatter(
+            avg_centroid_avg[1, UnitA],
+            avg_centroid_avg[2, UnitA],
+            c=UNIT_A_COLOR,
+        )
 
         plt2.plot(
             avg_waveform_per_tp_avg[1, UnitB, wave_idx[UnitB, :, 0].astype(bool)],
             avg_waveform_per_tp_avg[2, UnitB, wave_idx[UnitB, :, 0].astype(bool)],
-            "b",
+            color=UNIT_B_COLOR,
             label=f"Unit B ({UnitB})",
         )
-        plt2.scatter(avg_centroid_avg[1, UnitB], avg_centroid_avg[2, UnitB], c="b")
+        plt2.scatter(
+            avg_centroid_avg[1, UnitB],
+            avg_centroid_avg[2, UnitB],
+            c=UNIT_B_COLOR,
+        )
 
         plt2.set_xlabel(r"X position ($\mu$m)")
         plt2.set_ylabel(r"Y position ($\mu$m)")
@@ -2076,11 +2191,13 @@ def plot_trajectories(UnitA, UnitB, CV):
             avg_waveform_per_tp[
                 2, UnitA, wave_idx[UnitA, :, CV[0]].astype(bool), CV[0]
             ],
-            "g",
+            color=UNIT_A_COLOR,
             label=f"Unit A ({UnitA})",
         )
         plt2.scatter(
-            avg_centroid[1, UnitA, CV[0]], avg_centroid[2, UnitA, CV[0]], c="g"
+            avg_centroid[1, UnitA, CV[0]],
+            avg_centroid[2, UnitA, CV[0]],
+            c=UNIT_A_COLOR,
         )
 
         plt2.plot(
@@ -2090,11 +2207,13 @@ def plot_trajectories(UnitA, UnitB, CV):
             avg_waveform_per_tp[
                 2, UnitB, wave_idx[UnitB, :, CV[1]].astype(bool), CV[1]
             ],
-            "b",
+            color=UNIT_B_COLOR,
             label=f"Unit B ({UnitB})",
         )
         plt2.scatter(
-            avg_centroid[1, UnitB, CV[1]], avg_centroid[2, UnitB, CV[1]], c="b"
+            avg_centroid[1, UnitB, CV[1]],
+            avg_centroid[2, UnitB, CV[1]],
+            c=UNIT_B_COLOR,
         )
 
         plt2.set_xlabel(r"X position ($\mu$m)")
@@ -2104,7 +2223,14 @@ def plot_trajectories(UnitA, UnitB, CV):
     trajectory_plot.draw()
     trajectory_plot = trajectory_plot.get_tk_widget()
     #    TrajectoryPlot.configure(bg = '#33393b')
-    trajectory_plot.grid(row=3, column=1, columnspan=2)
+    trajectory_plot.grid(
+        row=3,
+        column=1,
+        columnspan=2,
+        padx=5,
+        pady=5,
+        sticky="nsew",
+    )
 
 
 def order_good_sites(good_sites, channel_pos, n_sessions):
@@ -2255,21 +2381,21 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
         if CV == "Avg":
             ax.plot(
                 waveform[unit_a, :, good_channel].mean(axis=-1).squeeze(),
-                color="g",
+                color=UNIT_A_COLOR,
             )
             ax.plot(
                 waveform[unit_b, :, good_channel].mean(axis=-1).squeeze(),
-                color="b",
+                color=UNIT_B_COLOR,
                 lw=0.8,
             )
         else:
             ax.plot(
                 waveform[unit_a, :, good_channel, CV[0]].squeeze(),
-                color="g",
+                color=UNIT_A_COLOR,
             )
             ax.plot(
                 waveform[unit_b, :, good_channel, CV[1]].squeeze(),
-                color="b",
+                color=UNIT_B_COLOR,
                 lw=0.8,
             )
         ax.set_ylim(sub_min_y, sub_max_y)
@@ -2287,7 +2413,7 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
     # RawWaveformPlot.configure(bg = '#33393b')
 
     raw_waveform_plot.grid(
-        row=3, column=4, columnspan=2, rowspan=4, padx=15, pady=25, ipadx=15
+        row=3, column=3, columnspan=2, rowspan=4, padx=15, pady=25, ipadx=15
     )
 
 
@@ -2297,7 +2423,7 @@ def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, u
     if hist_plot.winfo_exists() == 1:
         hist_plot.destroy()
 
-    fig = Figure(figsize=(4, 6), dpi=100, layout="constrained")
+    fig = Figure(figsize=(7, 6), dpi=100, layout="constrained")
     fig.patch.set_facecolor("#33393b")
     axs = fig.subplots(3, 2, sharex="col")
     axs = axs.flat
@@ -2317,13 +2443,13 @@ def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, u
         axs[i].step(
             hist[i][1][:-1],
             hist[i][0],
-            color="orange",
+            color=ALL_SCORES_COLOR,
             label="All scores" if i == 0 else "",
         )
         axs[i].step(
             hist_matched[i][1][:-1],
             hist_matched[i][0],
-            color="magenta",
+            color=APPROVED_MATCH_COLOR,
             label="Expected matches" if i == 0 else "",
         )
         axs[i].set_ylim(bottom=0)
@@ -2347,4 +2473,12 @@ def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, u
     hist_plot.draw()
     hist_plot = hist_plot.get_tk_widget()
 
-    hist_plot.grid(row=3, column=6, columnspan=2, rowspan=4, padx=5, pady=20)
+    hist_plot.grid(
+        row=3,
+        column=5,
+        columnspan=4,
+        rowspan=4,
+        padx=5,
+        pady=20,
+        sticky="nsew",
+    )

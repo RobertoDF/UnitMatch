@@ -18,6 +18,7 @@ from .save_utils import make_UnitMatch_folder_from_sorting_analyzers
 @dataclass
 class _UnitDiagnostics:
     times_ms: np.ndarray
+    waveforms: np.ndarray
     mean_waveforms: np.ndarray
     channel_indices: np.ndarray
     peak_channel_index: int
@@ -25,19 +26,39 @@ class _UnitDiagnostics:
     channel_locations: np.ndarray
     spike_times_s: np.ndarray
     spike_amplitudes: np.ndarray
+    spike_amplitudes_by_channel: np.ndarray
     all_spike_times_s: np.ndarray
 
     def has_channel(self, channel_index):
         return np.any(self.channel_indices == channel_index)
 
-    def waveform_on_channel(self, channel_index):
+    def _local_channel_index(self, channel_index):
         local_indices = np.flatnonzero(self.channel_indices == channel_index)
         if local_indices.size == 0:
             raise ValueError(
                 f"Global channel index {channel_index} is outside the unit's "
                 "waveform sparsity."
             )
-        return self.mean_waveforms[:, local_indices[0]]
+        return local_indices[0]
+
+    def waveform_on_channel(self, channel_index):
+        return self.mean_waveforms[:, self._local_channel_index(channel_index)]
+
+    def waveform_on_channel_for_spikes(self, channel_index, spike_mask):
+        local_channel_index = self._local_channel_index(channel_index)
+        selected_waveforms = self.waveforms[spike_mask]
+        if selected_waveforms.size == 0:
+            return np.full(self.times_ms.shape, np.nan)
+        return np.mean(
+            selected_waveforms[:, :, local_channel_index],
+            axis=0,
+        )
+
+    def spike_amplitudes_on_channel(self, channel_index):
+        return self.spike_amplitudes_by_channel[
+            :,
+            self._local_channel_index(channel_index),
+        ]
 
 
 def _probe_plot_axes(channel_locations):
@@ -102,6 +123,7 @@ class SpikeInterfaceSessionMerger:
         analyzer,
         unit_ids=None,
         match_threshold=0.5,
+        match_mode="or",
         censored_period_ms=None,
         merging_mode="soft",
     ):
@@ -116,6 +138,9 @@ class SpikeInterfaceSessionMerger:
         self._unit_sources = self._resolve_unit_sources()
         self.analyzer = self.analyzers[0]
         self.match_threshold = match_threshold
+        self.match_mode = match_mode.lower()
+        if self.match_mode not in {"or", "and"}:
+            raise ValueError("match_mode must be 'or' or 'and'.")
         self.censored_period_ms = censored_period_ms
         if merging_mode not in {"soft", "hard"}:
             raise ValueError("merging_mode must be either 'soft' or 'hard'.")
@@ -284,8 +309,9 @@ class SpikeInterfaceSessionMerger:
             param,
             clus_info,
             match_threshold=self.match_threshold,
+            match_mode=self.match_mode,
         )
-        self.decisions = {tuple(group): None for group in self.merge_groups}
+        self.decisions = {tuple(group): False for group in self.merge_groups}
         self.merged_analyzer = None
         return self.merge_groups
 
@@ -353,11 +379,15 @@ class SpikeInterfaceSessionMerger:
             / analyzer.sampling_frequency
         )
         spike_times_s = all_spike_times_s[selected_spike_indices]
-        spike_amplitudes = waveforms[
-            :, peak_sample_index, peak_channel_index
+        spike_amplitudes_by_channel = waveforms[
+            :,
+            peak_sample_index,
+            : channel_indices.size,
         ]
+        spike_amplitudes = spike_amplitudes_by_channel[:, peak_channel_index]
         return _UnitDiagnostics(
             times_ms=times_ms,
+            waveforms=waveforms[:, :, : channel_indices.size],
             mean_waveforms=mean_waveforms,
             channel_indices=channel_indices,
             peak_channel_index=int(channel_indices[peak_channel_index]),
@@ -365,6 +395,7 @@ class SpikeInterfaceSessionMerger:
             channel_locations=channel_locations,
             spike_times_s=spike_times_s,
             spike_amplitudes=spike_amplitudes,
+            spike_amplitudes_by_channel=spike_amplitudes_by_channel,
             all_spike_times_s=all_spike_times_s,
         )
 
@@ -381,9 +412,9 @@ class SpikeInterfaceSessionMerger:
             [diagnostic.peak_channel_index for diagnostic in diagnostics],
             channel_locations,
         )
-        figure = plt.figure(figsize=(16, 6), constrained_layout=True)
+        figure = plt.figure(figsize=(18, 7), constrained_layout=True)
         outer_grid = figure.add_gridspec(
-            1, 4, width_ratios=(1.35, 1, 1, 1)
+            1, 4, width_ratios=(1.35, 1.35, 1, 1)
         )
         waveform_grid = outer_grid[0].subgridspec(3, 1, hspace=0.08)
         waveform_axes = [figure.add_subplot(waveform_grid[0])]
@@ -391,22 +422,29 @@ class SpikeInterfaceSessionMerger:
             figure.add_subplot(waveform_grid[index], sharex=waveform_axes[0])
             for index in range(1, 3)
         )
-        probe_axis = figure.add_subplot(outer_grid[1])
-        amplitude_axis = figure.add_subplot(outer_grid[2])
-        rate_axis = figure.add_subplot(outer_grid[3])
+        amplitude_grid = outer_grid[1].subgridspec(3, 1, hspace=0.08)
+        amplitude_axes = [figure.add_subplot(amplitude_grid[0])]
+        amplitude_axes.extend(
+            figure.add_subplot(amplitude_grid[index], sharex=amplitude_axes[0])
+            for index in range(1, 3)
+        )
+        rate_axis = figure.add_subplot(outer_grid[2])
+        probe_axis = figure.add_subplot(outer_grid[3])
 
-        for waveform_axis, channel_index in zip(
-            waveform_axes, waveform_channel_indices
+        waveform_lines = {}
+        for axis_index, (waveform_axis, channel_index) in enumerate(
+            zip(waveform_axes, waveform_channel_indices)
         ):
             missing_units = []
             for unit_id, color, diagnostic in zip(group, colors, diagnostics):
                 if diagnostic.has_channel(channel_index):
-                    waveform_axis.plot(
+                    line, = waveform_axis.plot(
                         diagnostic.times_ms,
                         diagnostic.waveform_on_channel(channel_index),
                         color=color,
                         linestyle="-",
                     )
+                    waveform_lines[(axis_index, unit_id)] = line
                 else:
                     missing_units.append(str(unit_id))
             if missing_units:
@@ -477,21 +515,70 @@ class SpikeInterfaceSessionMerger:
         )
         probe_axis.legend(fontsize="small")
 
-        for unit_id, color, diagnostic in zip(group, colors, diagnostics):
-            amplitude_axis.scatter(
-                diagnostic.spike_times_s,
-                diagnostic.spike_amplitudes,
-                color=color,
-                s=10,
-                alpha=0.6,
-                label=f"Unit {unit_id}",
+        for amplitude_axis, channel_index in zip(
+            amplitude_axes,
+            waveform_channel_indices,
+        ):
+            missing_units = []
+            plotted_amplitudes = []
+            for unit_id, color, diagnostic in zip(group, colors, diagnostics):
+                if diagnostic.has_channel(channel_index):
+                    channel_amplitudes = diagnostic.spike_amplitudes_on_channel(
+                        channel_index
+                    )
+                    plotted_amplitudes.append(channel_amplitudes)
+                    amplitude_axis.scatter(
+                        diagnostic.spike_times_s,
+                        channel_amplitudes,
+                        color=color,
+                        s=10,
+                        alpha=0.6,
+                        label=f"Unit {unit_id}",
+                    )
+                else:
+                    missing_units.append(str(unit_id))
+            if missing_units:
+                amplitude_axis.text(
+                    0.99,
+                    0.04,
+                    f"Not in sparsity: unit {', '.join(missing_units)}",
+                    transform=amplitude_axis.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize="xx-small",
+                    color="0.35",
+                )
+            location = channel_locations[channel_index]
+            location_text = ", ".join(f"{coordinate:g}" for coordinate in location)
+            amplitude_axis.set_title(
+                f"Global channel {channel_index} ({location_text} um)",
+                fontsize="small",
             )
-        amplitude_axis.set(
-            title="Spike amplitudes over time",
-            xlabel="Time (s)",
-            ylabel="Signed peak amplitude",
-        )
-        amplitude_axis.legend(fontsize="small")
+            amplitude_axis.set_ylabel("Spike amplitude", fontsize="small")
+            amplitude_axis.tick_params(labelsize="x-small")
+            finite_amplitudes = (
+                np.concatenate(plotted_amplitudes)
+                if plotted_amplitudes
+                else np.array([])
+            )
+            finite_amplitudes = finite_amplitudes[
+                np.isfinite(finite_amplitudes)
+            ]
+            if finite_amplitudes.size:
+                lower, upper = np.percentile(
+                    finite_amplitudes,
+                    (2.5, 97.5),
+                )
+                if lower < upper:
+                    padding = 0.05 * (upper - lower)
+                    amplitude_axis.set_ylim(
+                        lower - padding,
+                        upper + padding,
+                    )
+        amplitude_axes[-1].set_xlabel("Time (s)")
+        for amplitude_axis in amplitude_axes[:-1]:
+            amplitude_axis.tick_params(labelbottom=False)
+        amplitude_axes[0].legend(fontsize="x-small")
 
         duration_s = max(
             analyzer.get_num_samples() / analyzer.sampling_frequency
@@ -522,6 +609,101 @@ class SpikeInterfaceSessionMerger:
             ylabel="Firing rate (Hz)",
         )
         rate_axis.legend(fontsize="small")
+
+        from matplotlib.widgets import SpanSelector
+
+        selection_patches = []
+        selection_title = figure.suptitle(
+            "Drag across an amplitude plot to average that time range; "
+            "right-click to reset",
+            fontsize="small",
+        )
+
+        def update_waveforms_for_interval(time_start_s, time_stop_s):
+            time_start_s, time_stop_s = sorted((time_start_s, time_stop_s))
+            for patch in selection_patches:
+                patch.remove()
+            selection_patches.clear()
+            selection_patches.extend(
+                axis.axvspan(
+                    time_start_s,
+                    time_stop_s,
+                    color="tab:green",
+                    alpha=0.12,
+                )
+                for axis in amplitude_axes
+            )
+
+            selected_counts = []
+            for unit_id, diagnostic in zip(group, diagnostics):
+                spike_mask = (
+                    (diagnostic.spike_times_s >= time_start_s)
+                    & (diagnostic.spike_times_s <= time_stop_s)
+                )
+                selected_counts.append(f"{unit_id}: {np.count_nonzero(spike_mask)}")
+                for axis_index, channel_index in enumerate(
+                    waveform_channel_indices
+                ):
+                    line = waveform_lines.get((axis_index, unit_id))
+                    if line is not None:
+                        line.set_ydata(
+                            diagnostic.waveform_on_channel_for_spikes(
+                                channel_index,
+                                spike_mask,
+                            )
+                        )
+
+            for waveform_axis in waveform_axes:
+                waveform_axis.relim()
+                waveform_axis.autoscale_view(scalex=False, scaley=True)
+            selection_title.set_text(
+                f"Selected {time_start_s:.1f}-{time_stop_s:.1f} s "
+                f"({', '.join(selected_counts)} spikes); right-click to reset"
+            )
+            figure.canvas.draw_idle()
+
+        def reset_waveforms(event=None):
+            for patch in selection_patches:
+                patch.remove()
+            selection_patches.clear()
+            for axis_index, channel_index in enumerate(
+                waveform_channel_indices
+            ):
+                for unit_id, diagnostic in zip(group, diagnostics):
+                    line = waveform_lines.get((axis_index, unit_id))
+                    if line is not None:
+                        line.set_ydata(
+                            diagnostic.waveform_on_channel(channel_index)
+                        )
+            for waveform_axis in waveform_axes:
+                waveform_axis.relim()
+                waveform_axis.autoscale_view(scalex=False, scaley=True)
+            selection_title.set_text(
+                "Drag across an amplitude plot to average that time range; "
+                "right-click to reset"
+            )
+            figure.canvas.draw_idle()
+
+        def handle_mouse_press(event):
+            if event.button == 3 and event.inaxes in amplitude_axes:
+                reset_waveforms()
+
+        span_selectors = [
+            SpanSelector(
+                axis,
+                update_waveforms_for_interval,
+                "horizontal",
+                minspan=0.1,
+                useblit=True,
+                props={"facecolor": "tab:green", "alpha": 0.2},
+                button=1,
+            )
+            for axis in amplitude_axes
+        ]
+        figure.canvas.mpl_connect("button_press_event", handle_mouse_press)
+        figure._unitmatch_span_selectors = span_selectors
+        figure._unitmatch_update_interval = update_waveforms_for_interval
+        figure._unitmatch_reset_waveforms = reset_waveforms
         return figure
 
     def display_review(self, show_diagnostics=True):
@@ -556,8 +738,9 @@ class SpikeInterfaceSessionMerger:
         )
         instructions = widgets.HTML(
             value=(
-                "Click the pair slider, then use the keyboard "
-                "<b>left/right arrow keys</b> to move between candidates."
+                "Pairs are <b style='color:firebrick'>rejected by default</b>. "
+                "Approve only the desired merges. Click the green Approve button "
+                "once, then press <b>Enter</b> to approve and advance."
             )
         )
         label = widgets.HTML(layout=widgets.Layout(width="500px"))
@@ -569,11 +752,13 @@ class SpikeInterfaceSessionMerger:
         )
         status = widgets.HTML()
         plot_output = widgets.Output()
+        active_figure = None
 
         def current_group():
             return self.merge_groups[navigator.value - 1]
 
         def render_candidate(*_):
+            nonlocal active_figure
             group = current_group()
             unit_a, unit_b = (unit_index[unit_id] for unit_id in group)
             probability_12 = self.output_prob_matrix[unit_a, unit_b]
@@ -596,10 +781,12 @@ class SpikeInterfaceSessionMerger:
             if show_diagnostics:
                 import matplotlib.pyplot as plt
 
+                if active_figure is not None:
+                    plt.close(active_figure)
                 with plot_output:
-                    figure = self._make_group_figure(group)
-                    display(figure)
-                    plt.close(figure)
+                    with plt.ioff():
+                        active_figure = self._make_group_figure(group)
+                    display(active_figure)
 
         def record(approved):
             self._set_decision(tuple(current_group()), approved)
