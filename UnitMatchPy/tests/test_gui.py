@@ -3,6 +3,18 @@ import numpy as np
 from UnitMatchPy import GUI as gui
 
 
+def test_gui_scale_uses_available_screen_space():
+    assert gui._get_gui_scale(1920, 1080) == 1.0
+    assert gui._get_gui_scale(1366, 768) == 668 / 980
+    assert gui._get_gui_scale(800, 600) == gui.GUI_MIN_SCALE
+
+
+def test_scaled_figure_size_uses_gui_scale(monkeypatch):
+    monkeypatch.setattr(gui, "gui_scale", 0.7)
+
+    np.testing.assert_allclose(gui._scaled_figsize(4, 6), (2.8, 4.2))
+
+
 def test_order_good_sites_handles_sixteen_channels():
     channel_pos = np.zeros((1, 16, 3))
     channel_pos[0, :, 1] = np.tile([0, 20], 8)

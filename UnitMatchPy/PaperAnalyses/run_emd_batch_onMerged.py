@@ -4,7 +4,7 @@
 # already runs UMPy/DeepUnitMatch on, so EMD can be compared to both using the
 # exact same functional-score AUC framework (test.AUC over a boolean
 # final_matches matrix), instead of re-deriving UnitMatch.mat-based AUCs the
-# way MATLAB/Paper_Figures/ComparetoYuanetal.m does.
+# way the original MATLAB ComparetoYuanetal.m analysis does.
 #
 # EMD itself is MATLAB-only and is not reimplemented here. This script only
 # prepares inputs for, and aggregates outputs from, an unmodified run of
@@ -27,7 +27,7 @@
 #   2. Run the MATLAB driver (calls Yuan's own NT_main/EMD_unit_match
 #      unmodified) for every group and every session pair:
 #          matlab -batch "run_EMD_batch_onMerged"
-#      See MATLAB/Paper_Figures/EMD_integration/run_EMD_batch_onMerged.m.
+#      Get run_EMD_batch_onMerged.m from the original UnitMatch repository.
 #      This reads RawSpikes.npy/channel_positions.npy directly and writes
 #      Yuan-format Output.mat (plus the original cluster IDs, for step 3) to
 #        BASE_OUTPUT/<X>/EMD/result_<i>_<j>/Output.mat
@@ -228,7 +228,7 @@ def run_stage():
     print(
         "\nStaging done. Now run the MATLAB driver, e.g.:\n"
         '  matlab -batch "run_EMD_batch_onMerged"\n'
-        "(see MATLAB/Paper_Figures/EMD_integration/run_EMD_batch_onMerged.m),\n"
+        "(available from the original EnnyvanBeest/UnitMatch repository),\n"
         "then re-run this script with --aggregate."
     )
 

@@ -12,6 +12,28 @@ UNIT_A_COLOR = "#EB6534"
 UNIT_B_COLOR = "#FBFAF8"
 APPROVED_MATCH_COLOR = "#43A047"
 ALL_SCORES_COLOR = "#C0E6DE"
+GUI_REFERENCE_WIDTH = 1820
+GUI_REFERENCE_HEIGHT = 980
+GUI_MIN_SCALE = 0.5
+gui_scale = 1.0
+
+
+def _get_gui_scale(screen_width, screen_height):
+    usable_width = max(screen_width - 100, 1)
+    usable_height = max(screen_height - 100, 1)
+    available_scale = min(
+        usable_width / GUI_REFERENCE_WIDTH,
+        usable_height / GUI_REFERENCE_HEIGHT,
+    )
+    return min(1.0, max(GUI_MIN_SCALE, available_scale))
+
+
+def _scaled_figsize(width, height):
+    return width * gui_scale, height * gui_scale
+
+
+def _scaled_font_size(size, minimum=8):
+    return max(minimum, round(size * gui_scale))
 
 
 def _widget_exists(widget):
@@ -261,18 +283,10 @@ def run_GUI():
     global acg_plot
     global toggle_acg_val
     global acg_cache
+    global gui_scale
 
     # Try to load pre-calculated ACG cache
     acg_cache = load_acg_cache()
-
-    rcParams.update({"figure.autolayout": True})
-    rcParams.update({"font.size": 14})
-    rcParams.update({"font.family": "DejaVu Sans"})
-    color = "white"
-    rcParams["text.color"] = color
-    rcParams["axes.labelcolor"] = color
-    rcParams["xtick.color"] = color
-    rcParams["ytick.color"] = color
 
     np.set_printoptions(suppress=True)
     is_match = []
@@ -287,6 +301,16 @@ def run_GUI():
     # Get screen width and height
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
+    gui_scale = _get_gui_scale(screen_width, screen_height)
+
+    rcParams.update({"figure.autolayout": True})
+    rcParams.update({"font.size": _scaled_font_size(14)})
+    rcParams.update({"font.family": "DejaVu Sans"})
+    color = "white"
+    rcParams["text.color"] = color
+    rcParams["axes.labelcolor"] = color
+    rcParams["xtick.color"] = color
+    rcParams["ytick.color"] = color
 
     # Set window size to fit the screen with some padding
     window_width = screen_width - 100
@@ -312,14 +336,19 @@ def run_GUI():
     s.theme_use("awdark")
 
     # Configure fonts for all TTK widgets to use DejaVu Sans
-    s.configure(".", font=("DejaVu Sans", 12))
-    s.configure("TLabel", font=("DejaVu Sans", 12))
-    s.configure("TButton", font=("DejaVu Sans", 12))
-    s.configure("TEntry", font=("DejaVu Sans", 10))
-    s.configure("TCombobox", font=("DejaVu Sans", 10))
-    s.configure("TCheckbutton", font=("DejaVu Sans", 12))
-    s.configure("TRadiobutton", font=("DejaVu Sans", 12))
-    s.configure("TLabelFrame.Label", font=("DejaVu Sans", 12, "bold"))
+    control_font_size = _scaled_font_size(12)
+    entry_font_size = _scaled_font_size(10)
+    s.configure(".", font=("DejaVu Sans", control_font_size))
+    s.configure("TLabel", font=("DejaVu Sans", control_font_size))
+    s.configure("TButton", font=("DejaVu Sans", control_font_size))
+    s.configure("TEntry", font=("DejaVu Sans", entry_font_size))
+    s.configure("TCombobox", font=("DejaVu Sans", entry_font_size))
+    s.configure("TCheckbutton", font=("DejaVu Sans", control_font_size))
+    s.configure("TRadiobutton", font=("DejaVu Sans", control_font_size))
+    s.configure(
+        "TLabelFrame.Label",
+        font=("DejaVu Sans", control_font_size, "bold"),
+    )
 
     root.title("UMPy - Manual Curation")
     # root.geometry('800x800')
@@ -776,7 +805,7 @@ def create_unit_legend():
     """Create visual legend for unit colors"""
     global unit_legend_plot
 
-    fig = Figure(figsize=(6, 0.5), dpi=100)
+    fig = Figure(figsize=_scaled_figsize(6, 0.5), dpi=100)
     fig.patch.set_facecolor("#33393b")
 
     ax = fig.add_subplot(111)
@@ -784,10 +813,24 @@ def create_unit_legend():
 
     # Draw legend lines and text
     ax.plot([0, 0.15], [0.5, 0.5], color=UNIT_A_COLOR, lw=3)
-    ax.text(0.18, 0.5, "Unit A", color="white", fontsize=12, va="center")
+    ax.text(
+        0.18,
+        0.5,
+        "Unit A",
+        color="white",
+        fontsize=_scaled_font_size(12),
+        va="center",
+    )
 
     ax.plot([0.6, 0.75], [0.5, 0.5], color=UNIT_B_COLOR, lw=3)
-    ax.text(0.78, 0.5, "Unit B", color="white", fontsize=12, va="center")
+    ax.text(
+        0.78,
+        0.5,
+        "Unit B",
+        color="white",
+        fontsize=_scaled_font_size(12),
+        va="center",
+    )
 
     ax.set_xlim(0, 1.2)
     ax.set_ylim(0, 1)
@@ -802,7 +845,7 @@ def create_hist_legend():
     """Create visual legend for histogram colors"""
     global hist_legend_plot
 
-    fig = Figure(figsize=(8, 0.5), dpi=100)
+    fig = Figure(figsize=_scaled_figsize(8, 0.5), dpi=100)
     fig.patch.set_facecolor("#33393b")
 
     ax = fig.add_subplot(111)
@@ -810,7 +853,14 @@ def create_hist_legend():
 
     # Draw legend elements
     ax.plot([0, 0.1], [0.5, 0.5], color=ALL_SCORES_COLOR, lw=3)
-    ax.text(0.12, 0.5, "All scores", color="white", fontsize=10, va="center")
+    ax.text(
+        0.12,
+        0.5,
+        "All scores",
+        color="white",
+        fontsize=_scaled_font_size(10),
+        va="center",
+    )
 
     ax.plot(
         [0.35, 0.45],
@@ -818,10 +868,24 @@ def create_hist_legend():
         color=APPROVED_MATCH_COLOR,
         lw=3,
     )
-    ax.text(0.47, 0.5, "Expected matches", color="white", fontsize=10, va="center")
+    ax.text(
+        0.47,
+        0.5,
+        "Expected matches",
+        color="white",
+        fontsize=_scaled_font_size(10),
+        va="center",
+    )
 
     ax.plot([0.75, 0.85], [0.5, 0.5], "white", lw=2, linestyle="--")
-    ax.text(0.87, 0.5, "Current pair", color="white", fontsize=10, va="center")
+    ax.text(
+        0.87,
+        0.5,
+        "Current pair",
+        color="white",
+        fontsize=_scaled_font_size(10),
+        va="center",
+    )
 
     ax.set_xlim(0, 1.2)
     ax.set_ylim(0, 1)
@@ -904,7 +968,7 @@ def plot_acgs(unit_a, unit_b):
         acg_plot.destroy()
 
     # Create figure for single overlaid ACG plot
-    fig = Figure(figsize=(3, 3), dpi=100)
+    fig = Figure(figsize=_scaled_figsize(3, 3), dpi=100)
     fig.patch.set_facecolor("#33393b")
 
     # Create single subplot for overlaid ACGs
@@ -976,22 +1040,37 @@ def plot_acgs(unit_a, unit_b):
             )
 
         # Set labels and title
-        ax.set_xlabel("Time lag (ms)", fontsize=10, color="white")
-        ax.set_ylabel("Rate (Hz)", fontsize=10, color="white")
-        ax.set_title("Autocorrelograms", fontsize=12, color="white")
+        ax.set_xlabel(
+            "Time lag (ms)",
+            fontsize=_scaled_font_size(10),
+            color="white",
+        )
+        ax.set_ylabel(
+            "Rate (Hz)",
+            fontsize=_scaled_font_size(10),
+            color="white",
+        )
+        ax.set_title(
+            "Autocorrelograms",
+            fontsize=_scaled_font_size(12),
+            color="white",
+        )
         ax.set_xlim(0, 50)  # 50ms
         if max_rate > 0:
             ax.set_ylim(0, max_rate * 1.1)
 
         # Add legend
-        legend = ax.legend(fontsize=8, loc="upper right")
+        legend = ax.legend(
+            fontsize=_scaled_font_size(8),
+            loc="upper right",
+        )
         legend.get_frame().set_facecolor("#33393b")
         legend.get_frame().set_alpha(0.8)
         for text in legend.get_texts():
             text.set_color("white")
 
         # Style the plot
-        ax.tick_params(colors="white", labelsize=8)
+        ax.tick_params(colors="white", labelsize=_scaled_font_size(8))
         ax.spines["bottom"].set_color("white")
         ax.spines["left"].set_color("white")
         ax.spines["top"].set_visible(False)
@@ -1008,7 +1087,7 @@ def plot_acgs(unit_a, unit_b):
             ha="center",
             va="center",
             color="white",
-            fontsize=12,
+            fontsize=_scaled_font_size(12),
         )
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
@@ -2094,7 +2173,7 @@ def plot_avg_waveforms(UnitA, UnitB, CV):
     if avg_waveform_plot.winfo_exists() == 1:
         avg_waveform_plot.destroy()
 
-    fig = Figure(figsize=(3, 3), dpi=100)
+    fig = Figure(figsize=_scaled_figsize(3, 3), dpi=100)
     fig.patch.set_facecolor("#33393b")
 
     plt1 = fig.add_subplot(111)
@@ -2146,7 +2225,11 @@ def plot_trajectories(UnitA, UnitB, CV):
     if trajectory_plot.winfo_exists() == 1:
         trajectory_plot.destroy()
 
-    fig = Figure(figsize=(4, 4), dpi=100, layout="constrained")
+    fig = Figure(
+        figsize=_scaled_figsize(4, 4),
+        dpi=100,
+        layout="constrained",
+    )
     fig.patch.set_facecolor("#33393b")
 
     plt2 = fig.add_subplot(111)
@@ -2295,7 +2378,7 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
     if raw_waveform_plot.winfo_exists() == 1:
         raw_waveform_plot.destroy()
 
-    fig = Figure(figsize=(4, 6), dpi=100)
+    fig = Figure(figsize=_scaled_figsize(4, 6), dpi=100)
     fig.set_tight_layout(False)
     fig.patch.set_facecolor("#33393b")
 
@@ -2404,8 +2487,14 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
     main_ax.spines.right.set_visible(False)
     main_ax.spines.top.set_visible(False)
     main_ax.set_xticks([min_x, max_x])
-    main_ax.set_xlabel("X position ($\mu$m)", size=14)
-    main_ax.set_ylabel("Y position ($\mu$m)", size=14)
+    main_ax.set_xlabel(
+        "X position ($\mu$m)",
+        size=_scaled_font_size(14),
+    )
+    main_ax.set_ylabel(
+        "Y position ($\mu$m)",
+        size=_scaled_font_size(14),
+    )
 
     raw_waveform_plot = FigureCanvasTkAgg(fig, master=root)
     raw_waveform_plot.draw()
@@ -2423,7 +2512,11 @@ def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, u
     if hist_plot.winfo_exists() == 1:
         hist_plot.destroy()
 
-    fig = Figure(figsize=(7, 6), dpi=100, layout="constrained")
+    fig = Figure(
+        figsize=_scaled_figsize(7, 6),
+        dpi=100,
+        layout="constrained",
+    )
     fig.patch.set_facecolor("#33393b")
     axs = fig.subplots(3, 2, sharex="col")
     axs = axs.flat
@@ -2456,10 +2549,10 @@ def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, u
 
         # Use improved title from mapping
         plot_title = title_mapping.get(hist_names[i], hist_names[i])
-        axs[i].set_title(plot_title, fontsize=12)
+        axs[i].set_title(plot_title, fontsize=_scaled_font_size(12))
 
         # Add ylabel
-        axs[i].set_ylabel("% units", fontsize=10)
+        axs[i].set_ylabel("% units", fontsize=_scaled_font_size(10))
 
         axs[i].axvline(
             scores_to_include[hist_names[i]][unit_a, unit_b],
