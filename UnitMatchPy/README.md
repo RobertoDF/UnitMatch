@@ -122,6 +122,21 @@ also shows threshold eligibility and both CV probabilities. Dashed rays show the
 boundaries used by the unusual-displacement filter, which filters Unit A only.
 Zero-length displacement or an undefined reference direction has no angle.
 
+Both tables also show **Disp. consistency**, a post-hoc 0-100 displacement
+similarity score based on the currently accepted reference, excluding pairs
+sharing either candidate endpoint. It does not change UM probability, ranking,
+or automatic matches. Hover over a value for the residual, normalized distance,
+reference count, and scope; `n/a` includes an explanation. Fits are cached and
+computed in a separate background worker, even without event data, and refresh
+after manual decisions.
+
+The default minimum is 20 usable reference pairs after exclusions; set
+`displacement_min_references_in=20` in `gui.process_info_for_GUI(...)` to
+configure it. Reference groups use session pair and probe, plus per-unit
+`clus_info["shank_ids"]` when supplied. Without those IDs the tooltip explicitly
+labels the reference as probe-only. See the
+[method and limitations](../README.md#displacement-consistency).
+
 `Event r` is the equal-weight mean of Pearson correlations between the two
 units' trial-averaged PSTHs for shared event types, using the Event Viewer's
 window and bin settings (initially 1 second before, 2 seconds after, 10 ms bins).
@@ -140,6 +155,11 @@ For a nonblocking IPython/Jupyter review, call
 inputs. This enables the Tk event loop while keeping the kernel available.
 Reopening an already open review focuses that window rather than creating a
 duplicate. Saving curated analyzers remains a separate, explicit step.
+`preserve_decisions=True` is the default: closing/reopening keeps decisions in
+memory, not on disk. Use `preserve_decisions=False` only to deliberately start
+a fresh review after closing the window. Accepting a new partner rejects
+accepted competitors at either endpoint within the same session pair, not links
+to other sessions.
 
 ### Run DeepUnitMatch 
 

@@ -8,6 +8,9 @@ This repository contains the Python implementations:
 - **UnitMatchPy** for probabilistic unit matching and manual review.
 - **DeepUnitMatch** for deep-learning-based matching.
 
+This fork is maintained by Roberto ([@RobertoDF](https://github.com/RobertoDF))
+and focuses on SpikeInterface integration and interactive unit review.
+
 ## Changes from the original UnitMatch repository
 
 This fork builds on [EnnyvanBeest/UnitMatch](https://github.com/EnnyvanBeest/UnitMatch),
@@ -20,7 +23,7 @@ the original MATLAB implementation.
 | --- | --- |
 | SpikeInterface integration | Export UnitMatch inputs from prepared sorting analyzers, review within-session merge groups, and save curated analyzers explicitly. Shared diagnostic helpers reuse stored waveform samples rather than computing extensions during review. |
 | Manual review | Scrollable, color-coded Unit A and Unit B tables; separate session and CV selection; explicit green **Set as Match** and red **Set as Non Match** buttons; selectable original unit/probe identities and pair lookup. |
-| Spatial diagnostics | Raw displacement magnitude and angle in both tables, a larger equal-scale displacement map, and dashed 60-degree boundaries around the automatic-match mean for each probe/session pair. The unusual-displacement filter affects Unit A only, leaving every Unit B alternative accessible. |
+| Spatial diagnostics | Raw displacement magnitude, angle, and **Disp. consistency** in both tables. The new post-hoc consistency score compares displacement against a robust reference of currently accepted pairs without changing UM probability. A larger equal-scale displacement map and dashed 60-degree automatic-mean boundaries support visual review. The unusual-displacement filter affects Unit A only. |
 | Event responses | A linked Event Viewer compares event-aligned firing rates. Both tables show cached, asynchronously computed shared-event PSTH correlations without changing match probabilities or decisions. |
 | Plotting and notebooks | Wider average waveforms, larger raw-waveform and score panels, visible legend handles, spike-aware histogram scaling, and nonblocking IPython/Tk review. Reopening an active review focuses the existing window. |
 
@@ -35,6 +38,7 @@ accepted and an accepted better-or-tied alternative, ranked by average match
 probability, shares either endpoint within the same session pair. Red means no
 such accepted alternative exists. Its angle, distance, and **Event r** refer to
 that row's listed **Best B**, not necessarily the currently selected Unit B.
+The same pairing rule applies to **Disp. consistency**.
 
 **Unit B:** green means the pair exceeds the automatic threshold in either CV
 direction (**OR**) or both directions (**AND**), according to the selected rule;
@@ -47,6 +51,56 @@ current windows and bin size. Missing or undefined results are shown as `n/a`,
 not zero. These values are review evidence, not calibrated identity probabilities
 or automatic matching criteria. Selecting matches by response similarity can
 bias later analyses of functional stability or plasticity.
+
+### Displacement consistency
+
+**Disp. consistency** is a post-hoc 0-100 similarity score, **not a match
+probability, p-value, or seventh input to UnitMatch**. The original six scores,
+UM probabilities, ranking, automatic decisions, and automatic-mean angle filter
+are unchanged.
+
+The diagnostic uses raw XY centroid displacement before drift correction,
+averaged over the two waveform halves. Its reference includes all currently
+accepted pairs (automatic plus manual accepts, minus explicit rejections) from
+the same session pair and probe, and the same shank when `clus_info["shank_ids"]`
+is supplied. Without shank metadata, the tooltip explicitly says the reference
+is probe-only; supply shank IDs for multi-shank probes rather than assuming
+shank isolation. Reciprocal pairs are counted once. Reference pairs sharing
+either candidate endpoint are excluded, so accepting a pair cannot directly
+make its own diagnostic look better.
+Ambiguous reference pairs sharing an endpoint with another accepted pair in
+the same group are also excluded rather than counted as independent evidence.
+
+A deterministic scikit-learn `MinCovDet` fit estimates the dominant accepted
+population's displacement centre and covariance. A conservative diagonal
+uncertainty floor is added: for each XY axis, take the normal-consistent MAD
+of the difference between the two halves' pair displacements, divide by two,
+and square. Under independent, equal-variance waveform halves this estimates
+uncertainty in the half-averaged displacement; adding it is conservative because
+the empirical scatter already contains measurement noise. No arbitrary small
+epsilon substitutes for missing physical uncertainty. Singular or severely
+ill-conditioned results remain `n/a`.
+
+The score is `100 * exp(-D_squared / 2)`, where `D_squared` is the
+squared Mahalanobis residual relative to that reference. A consistent
+zero-displacement pair is valid; unlike an angle-only check, the diagnostic
+does not treat a short displacement as an automatic failure. This assumes a
+dominant coherent displacement population, not a validated model for multiple
+distinct displacement clusters.
+
+The initial minimum is **20 usable reference pairs after exclusions**,
+configurable with `displacement_min_references_in` in
+`gui.process_info_for_GUI(...)`. This is an initial review setting, not a
+validated universal threshold. Insufficient data or unreliable uncertainty
+produces `n/a`, never a fabricated zero. Hover over a value for the residual
+in micrometers, normalized distance, reference count, scope, or unavailable
+reason. Calculations are cached and run in a background worker independently
+of Event r, and both tables refresh when a manual decision changes.
+
+Manual decisions are preserved **in memory** when reopening the GUI by default;
+this is not disk autosave. Accepting a new partner rejects competing accepted
+pairs at either endpoint within that session pair, while preserving links to
+other sessions.
 
 ### Tk review and Event Viewer
 

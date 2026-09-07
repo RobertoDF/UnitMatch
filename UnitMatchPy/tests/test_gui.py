@@ -1079,6 +1079,8 @@ def test_identical_displacement_arrows_remain_distinct(monkeypatch):
 
 
 def test_manual_decisions_refresh_displacement_overlay(monkeypatch):
+    monkeypatch.setattr(gui, "clus_info", {"session_id": np.array([0, 0, 0, 1])}, raising=False)
+    monkeypatch.setattr(gui, "automatic_match_pairs", set())
     class Entry:
         def __init__(self, value):
             self.value = value

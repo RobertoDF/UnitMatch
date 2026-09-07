@@ -32,6 +32,10 @@ event_spike_times_cache = {}
 event_correlation_cache = {}
 event_view_settings = (1.0, 2.0, 0.01)
 event_metric_executor = None
+displacement_metric_executor = None
+displacement_context = None
+displacement_context_key = None
+displacement_min_references = 20
 score_histogram_cache = {}
 event_view_window = None
 event_view_refresh = None
@@ -81,6 +85,11 @@ class _UnitTable(ttk.Frame):
         self.table.configure(yscrollcommand=scrollbar.set)
         self.table.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
+        horizontal_scrollbar = ttk.Scrollbar(
+            self, orient="horizontal", command=self.table.xview,
+        )
+        self.table.configure(xscrollcommand=horizontal_scrollbar.set)
+        horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         style = ttk.Style(self)
@@ -124,23 +133,149 @@ class _DiagnosticUnitTable(_UnitTable):
         self._metric_future = None
         self._metric_after = None
         self._metric_pairs = []
+        self._displacement_cancel = Event()
+        self._displacement_future = None
+        self._displacement_after = None
+        self._displacement_details = {}
+        self._tooltip = None
+        self._tooltip_after = None
+        self._tooltip_row = None
         super().__init__(master, values)
+        self.table.bind("<Motion>", self._hover_displacement)
+        self.table.bind("<Leave>", self._hide_displacement_tooltip)
+        self.table.bind("<ButtonPress>", self._hide_displacement_tooltip, add="+")
 
     def _clear_diagnostics(self):
         self._cancel_event_metrics()
+        self._cancel_displacement_metrics()
+        self._hide_displacement_tooltip()
         self._clear_options()
         self._metric_pairs = []
+        self._displacement_details = {}
 
     def _set_pair_metrics(self, row, unit_a, unit_b):
         magnitude, angle = _pair_displacement_metrics(unit_a, unit_b)
         self.table.set(row, "angle", "n/a" if angle is None else f"{angle:.1f}")
         self.table.set(row, "distance", "n/a" if magnitude is None else f"{magnitude:.1f}")
         self.table.set(row, "event_r", "..." if event_data is not None else "n/a")
+        self.table.set(row, "displacement", "...")
         self._metric_pairs.append((row, unit_a, unit_b))
 
     def _queue_event_metrics(self):
         if self._metric_pairs and event_data is not None:
             self._metric_after = self.after_idle(self.refresh_event_metrics)
+        if self._metric_pairs:
+            self._displacement_after = self.after_idle(self.refresh_displacement_metrics)
+
+    def _cancel_displacement_metrics(self):
+        self._displacement_cancel.set()
+        if self._displacement_future is not None:
+            self._displacement_future.cancel()
+        if self._displacement_after is not None:
+            self.after_cancel(self._displacement_after)
+            self._displacement_after = None
+
+    def refresh_displacement_metrics(self):
+        global displacement_metric_executor
+        self._cancel_displacement_metrics()
+        self._hide_displacement_tooltip()
+        self._displacement_details = {}
+        if not self._metric_pairs:
+            return
+        model, reason, scope = _get_displacement_context()
+        self._displacement_scope = scope
+        for row, _, _ in self._metric_pairs:
+            self.table.set(row, "displacement", "..." if model is not None else "n/a")
+            self._displacement_details[row] = reason or "Calculating displacement consistency..."
+        if model is None:
+            return
+        self._displacement_cancel = Event()
+        self._displacement_results = Queue()
+        if displacement_metric_executor is None:
+            displacement_metric_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="unitmatch-displacement",
+            )
+        pairs = sorted(self._metric_pairs, key=lambda pair: pair[0] != self.get())
+        self._displacement_future = displacement_metric_executor.submit(
+            _compute_displacement_consistency, pairs, model,
+            self._displacement_cancel, self._displacement_results,
+        )
+        self._displacement_after = self.after(50, self._poll_displacement_metrics)
+
+    def _poll_displacement_metrics(self):
+        self._displacement_after = None
+        finished = self._displacement_future.done()
+        while True:
+            try:
+                row, result = self._displacement_results.get_nowait()
+            except Empty:
+                break
+            self.table.set(
+                row, "displacement", "n/a" if result.score is None else f"{result.score:.1f}",
+            )
+            details = (
+                f"Reference: {result.reference_count} independent accepted pairs "
+                f"(minimum {displacement_min_references}).\n"
+                f"Scope: {self._displacement_scope}; same session pair.\n"
+                "Both candidate endpoints excluded."
+            )
+            if result.score is None:
+                details = f"Unavailable: {result.reason}\n{details}"
+            else:
+                details = (
+                    f"Consistency: {result.score:.1f}/100 (not a match probability).\n"
+                    f"Residual: {result.residual_um:.2f} um; "
+                    f"normalized distance: {result.distance:.2f}.\n{details}"
+                )
+            self._displacement_details[row] = details
+            if self._tooltip is not None and self._tooltip_row == row:
+                self._tooltip_label.configure(text=details)
+        if finished:
+            error = self._displacement_future.exception()
+            if error is not None:
+                for row, _, _ in self._metric_pairs:
+                    if self.table.set(row, "displacement") == "...":
+                        self.table.set(row, "displacement", "error")
+                        self._displacement_details[row] = f"Calculation failed: {error}"
+            self._displacement_future.result()
+        else:
+            self._displacement_after = self.after(50, self._poll_displacement_metrics)
+
+    def _hover_displacement(self, event):
+        column = self.table.identify_column(event.x)
+        expected = f"#{tuple(self.table['columns']).index('displacement') + 1}"
+        row = self.table.identify_row(event.y) if column == expected else ""
+        if row == self._tooltip_row:
+            return
+        self._hide_displacement_tooltip()
+        if row:
+            self._tooltip_row = row
+            self._tooltip_after = self.after(
+                300, lambda: self._show_displacement_tooltip(event.x_root, event.y_root),
+            )
+
+    def _show_displacement_tooltip(self, x, y):
+        self._tooltip_after = None
+        self._tooltip = Toplevel(self)
+        self._tooltip.overrideredirect(True)
+        self._tooltip_label = ttk.Label(
+            self._tooltip, text=self._displacement_details.get(self._tooltip_row, ""),
+            padding=8, wraplength=350, justify="left",
+        )
+        self._tooltip_label.pack()
+        self._tooltip.update_idletasks()
+        x = min(x + 12, self.winfo_screenwidth() - self._tooltip.winfo_reqwidth() - 10)
+        y = min(y + 16, self.winfo_screenheight() - self._tooltip.winfo_reqheight() - 10)
+        self._tooltip.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _hide_displacement_tooltip(self, event=None):
+        if self._tooltip_after is not None:
+            self.after_cancel(self._tooltip_after)
+            self._tooltip_after = None
+        if self._tooltip is not None:
+            self._tooltip.destroy()
+            self._tooltip = None
+        self._tooltip_row = None
 
     def _cancel_event_metrics(self):
         self._metric_cancel.set()
@@ -197,6 +332,8 @@ class _DiagnosticUnitTable(_UnitTable):
 
     def destroy(self):
         self._cancel_event_metrics()
+        self._cancel_displacement_metrics()
+        self._hide_displacement_tooltip()
         super().destroy()
 
 
@@ -206,6 +343,7 @@ class UnitATable(_DiagnosticUnitTable):
     columns = (
         ("unit", "Unit A", 50), ("partner", "Best B", 50), ("status", "Pair status", 115),
         ("angle", "Angle (deg)", 85), ("distance", "Dist (um)", 75), ("event_r", "Event r", 65),
+        ("displacement", "Disp. consistency", 145),
     )
     table_style = "UnitA.Treeview"
     selection_event = "<<UnitASelected>>"
@@ -237,6 +375,7 @@ class UnitBTable(_DiagnosticUnitTable):
         ("unit", "Unit B", 50), ("cv12", "P12", 50), ("cv21", "P21", 50),
         ("angle", "Angle (deg)", 85), ("distance", "Dist (um)", 75),
         ("event_r", "Event r", 65),
+        ("displacement", "Disp. consistency", 145),
     )
     table_style = "UnitB.Treeview"
     selection_event = "<<UnitBSelected>>"
@@ -283,11 +422,58 @@ def create_unit_b_diagnostic_legend(master):
     return ttk.Label(
         master,
         text=(
-            "Angle: from automatic mean; Dist: raw displacement. "
-            "Event r: mean shared-event PSTH correlation (Event Viewer settings)."
+            "Angle: automatic mean. Dist: raw displacement.\n"
+            "Event r: shared-event PSTH correlation.\n"
+            "Disp. consistency: 0-100, not UM probability.\n"
+            "Hover for reference count and residual."
         ),
         wraplength=round(360 * gui_scale),
     )
+
+
+def _get_displacement_context():
+    """Snapshot the curated reference once; the worker owns all model fitting."""
+    global displacement_context, displacement_context_key
+    if raw_avg_centroid is None:
+        return None, "Raw pre-drift centroids are unavailable.", ""
+    if "probe_numbers" not in clus_info:
+        return None, "Probe metadata is unavailable.", ""
+    accepted = tuple(sorted(_curated_accepted_pairs(
+        automatic_match_pairs, is_match, not_match,
+    )))
+    key = (id(raw_avg_centroid), id(clus_info), displacement_min_references, accepted)
+    if displacement_context_key != key:
+        from UnitMatchPy.displacement_consistency import DisplacementConsistency
+
+        shanks = clus_info.get("shank_ids")
+        model = DisplacementConsistency(
+            raw_avg_centroid, clus_info["session_id"], clus_info["probe_numbers"],
+            accepted, shank_ids=shanks, min_references=displacement_min_references,
+        )
+        scope = "same probe and shank" if shanks is not None else "same probe (no shank metadata)"
+        displacement_context = (model, "", scope)
+        displacement_context_key = key
+    return displacement_context
+
+
+def _compute_displacement_consistency(pairs, model, cancel, results):
+    for row, unit_a, unit_b in pairs:
+        if cancel.is_set():
+            return
+        result = model.score(unit_a, unit_b)
+        if cancel.is_set():
+            return
+        results.put((row, result))
+
+
+def _refresh_displacement_consistency():
+    global displacement_context, displacement_context_key
+    displacement_context = None
+    displacement_context_key = None
+    for name in ("entry_a", "entry_b"):
+        table = globals().get(name)
+        if isinstance(table, _DiagnosticUnitTable) and _widget_exists(table):
+            table.refresh_displacement_metrics()
 
 
 def _automatic_displacement_reference(unit_a, unit_b):
@@ -919,12 +1105,13 @@ def load_acg_cache(cache_path="acg_cache.pkl"):
         return None
 
 
-def run_GUI(*, preserve_decisions=False, block=True):
+def run_GUI(*, preserve_decisions=True, block=True):
     """
     This function runs the GUI, allowing the user to look at the result and manually curate the matches.
 
     Set ``block=False`` in an IPython notebook to keep the kernel available
-    while Tk processes events. ``preserve_decisions`` retains manual review edits.
+    while Tk processes events. Manual decisions are retained in memory by default.
+    After closing the window, pass ``preserve_decisions=False`` for a fresh review.
 
     Returns
     -------
@@ -964,6 +1151,7 @@ def run_GUI(*, preserve_decisions=False, block=True):
     global toggle_unusual_displacement_val
     global unusual_displacement_status_label
     global review_info_frame
+    global displacement_context, displacement_context_key
 
     existing_root = globals().get("root")
     if existing_root is not None and _widget_exists(existing_root):
@@ -988,6 +1176,8 @@ def run_GUI(*, preserve_decisions=False, block=True):
     if not preserve_decisions:
         is_match = []
         not_match = []
+    displacement_context = None
+    displacement_context_key = None
     root = Tk()
     previous_colors = {
         key: rcParams[key]
@@ -995,10 +1185,16 @@ def run_GUI(*, preserve_decisions=False, block=True):
     }
 
     def close_gui():
-        global event_metric_executor
+        global event_metric_executor, displacement_metric_executor
+        for table in (entry_a, entry_b):
+            table._cancel_event_metrics()
+            table._cancel_displacement_metrics()
         if event_metric_executor is not None:
             event_metric_executor.shutdown(wait=False, cancel_futures=True)
             event_metric_executor = None
+        if displacement_metric_executor is not None:
+            displacement_metric_executor.shutdown(wait=False, cancel_futures=True)
+            displacement_metric_executor = None
         rcParams.update(previous_colors)
         root.quit()
         root.destroy()
@@ -1325,11 +1521,16 @@ def process_info_for_GUI(
     raw_output_in=None,
     event_data_in=None,
     raw_avg_centroid_in=None,
+    displacement_min_references_in=20,
 ):
     """
     This function:
     1 - passes data to the GUI
     2 - processes the data so it is in a better form for the GUI
+
+    ``displacement_min_references_in`` controls the post-hoc consistency
+    diagnostic only (default 20 accepted pairs after endpoint exclusions).
+    Optional per-unit ``clus_info_in["shank_ids"]`` further scopes its reference.
     """
     global matches_avg
     global matches_GUI
@@ -1370,6 +1571,20 @@ def process_info_for_GUI(
     global unusual_displacement_pairs
     global unusual_displacement_group_info
     global event_correlation_cache
+    global displacement_min_references, displacement_context, displacement_context_key
+    if (
+        isinstance(displacement_min_references_in, (bool, np.bool_))
+        or not isinstance(displacement_min_references_in, (int, np.integer))
+        or displacement_min_references_in < 3
+    ):
+        raise ValueError("displacement_min_references_in must be an integer of at least 3")
+    displacement_min_references = int(displacement_min_references_in)
+    displacement_context = None
+    displacement_context_key = None
+    for name in ("entry_a", "entry_b"):
+        table = globals().get(name)
+        if isinstance(table, _DiagnosticUnitTable) and _widget_exists(table):
+            table._cancel_displacement_metrics()
     amplitude = amplitude_in
     spatial_decay = spatial_decay_in
     avg_centroid = avg_centroid_in
@@ -3098,20 +3313,44 @@ def add_probability_label(UnitA, UnitB, CVoption):
     )
 
 
-def set_match(event=None):
-    global is_match
-    global not_match
-    unit_a = int(entry_a.get())
-    unit_b = int(entry_b.get())
-
+def _accept_pair(unit_a, unit_b):
+    """Replace accepted competitors at either endpoint within this session pair."""
+    sessions = clus_info["session_id"]
+    session_pair = tuple(sorted((sessions[unit_a], sessions[unit_b])))
+    selected_units = {unit_a, unit_b}
+    conflicts = [
+        (first, second)
+        for first, second in _curated_accepted_pairs(
+            automatic_match_pairs, is_match, not_match,
+        )
+        if {first, second} != selected_units
+        and (first in selected_units or second in selected_units)
+        and tuple(sorted((sessions[first], sessions[second]))) == session_pair
+    ]
+    rejected_pairs = {
+        pair
+        for first, second in conflicts
+        for pair in ((first, second), (second, first))
+    }
+    is_match[:] = [pair for pair in is_match if tuple(pair) not in rejected_pairs]
+    for pair in sorted(rejected_pairs):
+        if list(pair) not in not_match:
+            not_match.append(list(pair))
     pairs = [[unit_a, unit_b], [unit_b, unit_a]]
     not_match[:] = [pair for pair in not_match if pair not in pairs]
     for pair in pairs:
         if pair not in is_match:
             is_match.append(pair)
+
+
+def set_match(event=None):
+    unit_a = int(entry_a.get())
+    unit_b = int(entry_b.get())
+    _accept_pair(unit_a, unit_b)
     add_probability_label(unit_a, unit_b, CV_tkinter.get() - 1)
     _refresh_raw_displacement_overlay()
     color_unit_a_options()
+    _refresh_displacement_consistency()
 
 
 def set_not_match(event=None):
@@ -3128,6 +3367,7 @@ def set_not_match(event=None):
     add_probability_label(unit_a, unit_b, CV_tkinter.get() - 1)
     _refresh_raw_displacement_overlay()
     color_unit_a_options()
+    _refresh_displacement_consistency()
 
 
 def MakeTable(table):
