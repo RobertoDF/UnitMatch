@@ -5,6 +5,7 @@ import pytest
 from matplotlib import pyplot as plt
 from UnitMatchPy.spikeinterface_merging import (
     SpikeInterfaceSessionMerger,
+    _waveforms_for_interval,
     _select_waveform_channels,
 )
 
@@ -43,6 +44,9 @@ class _Analyzer:
     @staticmethod
     def get_num_channels():
         return 2
+
+    def get_channel_ids(self):
+        return np.arange(self.get_num_channels())
 
     def get_extension(self, name):
         if name == "waveforms":
@@ -217,7 +221,21 @@ def test_group_figure_renders_waveforms_and_probe_locations():
     original_waveform = figure.axes[0].lines[0].get_ydata().copy()
     figure._unitmatch_update_interval(0.5, 1.5)
     selected_waveform = figure.axes[0].lines[0].get_ydata()
+    diagnostics = [
+        merger._get_unit_diagnostics(unit_id) for unit_id in (10, 11)
+    ]
+    channels = _select_waveform_channels(
+        [diagnostic.peak_channel_index for diagnostic in diagnostics],
+        diagnostics[0].channel_locations,
+    )
+    shared_waveforms, shared_counts = _waveforms_for_interval(
+        diagnostics,
+        channels,
+        (0.5, 1.5),
+    )
     assert not np.array_equal(original_waveform, selected_waveform)
+    np.testing.assert_array_equal(selected_waveform, shared_waveforms[(0, 0)])
+    assert shared_counts == {0: 0, 1: 0}
 
     figure._unitmatch_reset_waveforms()
     np.testing.assert_array_equal(

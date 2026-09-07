@@ -114,6 +114,33 @@ Example notebooks:
 
 The GUI is an optional step to curate and explore UnitMatch outputs; see `Demo Notebooks/GUI_Reference_Guide.md` for usage tips and shortcuts.
 
+Both Tk unit tables show raw displacement magnitude in micrometers, the angle
+from the automatic-match mean for the same probe and session pair, and event
+response correlation. Unit A metrics refer to each row's listed Best B partner;
+Unit B metrics refer to its pairing with the currently selected Unit A. Unit B
+also shows threshold eligibility and both CV probabilities. Dashed rays show the 60-degree
+boundaries used by the unusual-displacement filter, which filters Unit A only.
+Zero-length displacement or an undefined reference direction has no angle.
+
+`Event r` is the equal-weight mean of Pearson correlations between the two
+units' trial-averaged PSTHs for shared event types, using the Event Viewer's
+window and bin settings (initially 1 second before, 2 seconds after, 10 ms bins).
+An event type needs at least two occurrences in each session and nonconstant,
+finite profiles; `n/a` means no usable shared profiles, not zero correlation.
+The values are computed asynchronously and cached; `...` means pending and
+`error` reports a data-access failure in the notebook output.
+These are review diagnostics, not additional matching criteria. Response
+similarity alone does not establish identity, and using it to select matches
+can bias subsequent analyses of functional stability or plasticity.
+
+![Tk review and Event Viewer](../docs/images/unitmatch-review-with-events.png)
+
+For a nonblocking IPython/Jupyter review, call
+`gui.run_GUI(block=False, preserve_decisions=True)` after preparing the GUI
+inputs. This enables the Tk event loop while keeping the kernel available.
+Reopening an already open review focuses that window rather than creating a
+duplicate. Saving curated analyzers remains a separate, explicit step.
+
 ### Run DeepUnitMatch 
 
 To try the DeepUnitMatch version, start with:

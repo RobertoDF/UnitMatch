@@ -60,3 +60,6 @@ parity = ["pytest", "spikeinterface>=0.100,<0.120"]
 [tool.setuptools]
 # explicitly include only the Python package folder
 packages = ["UnitMatchPy"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__/*", "*.py[cod]"]
