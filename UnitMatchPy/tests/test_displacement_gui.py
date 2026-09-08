@@ -1,5 +1,7 @@
 import time
 import unittest
+import ast
+from pathlib import Path
 from concurrent.futures import Future
 from queue import Queue
 from threading import Event
@@ -44,6 +46,140 @@ class DisplacementGuiTests(unittest.TestCase):
         model.score.reset_mock()
         gui._compute_displacement_consistency([("0", 0, 4)], model, cancel, results)
         model.score.assert_not_called()
+
+    def test_tk_variables_and_images_use_explicit_window_ownership(self):
+        tree = ast.parse(Path(gui.__file__).read_text(encoding="utf-8"))
+        constructors = {"IntVar", "DoubleVar", "BooleanVar", "StringVar", "PhotoImage"}
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in constructors
+        ]
+        self.assertGreaterEqual(len(calls), 10)
+        for call in calls:
+            with self.subTest(constructor=call.func.id, line=call.lineno):
+                self.assertIn("master", {keyword.arg for keyword in call.keywords})
+
+    def test_consistency_filter_excludes_missing_and_uses_strict_cutoff(self):
+        model = Mock()
+        model.score.side_effect = [
+            SimpleNamespace(score=19.9), SimpleNamespace(score=20),
+            SimpleNamespace(score=None), SimpleNamespace(score=0),
+        ]
+        selected, unavailable = gui._compute_consistency_filter(
+            [(0, 4), (1, 5), (2, 6), (3, 7)], model, 20, Event(),
+        )
+        self.assertEqual(selected, {(0, 4), (3, 7)})
+        self.assertEqual(unavailable, 1)
+        cancel = Event()
+        cancel.set()
+        self.assertIsNone(gui._compute_consistency_filter([(0, 4)], model, 20, cancel))
+
+    def test_queued_navigation_is_coalesced(self):
+        root = Mock()
+        root.after_idle.side_effect = ["first", "second"]
+        with patch.object(gui, "root", root, create=True):
+            gui.pending_redraw = None
+            gui.update(None)
+            gui.update(None)
+            root.after_cancel.assert_called_once_with("first")
+            self.assertEqual(gui.pending_redraw, "second")
+
+    def test_filter_refresh_after_decision_uses_current_reference(self):
+        with (
+            patch.object(gui, "_unusual_filter_enabled", return_value=True),
+            patch.object(gui, "update_unusual_displacement_filter") as refresh,
+        ):
+            gui._refresh_displacement_consistency()
+            refresh.assert_called_once_with()
+
+    def test_async_filter_waits_then_applies_results(self):
+        future = Future()
+        root = Mock()
+        with (
+            patch.object(gui, "root", root, create=True),
+            patch.object(gui, "consistency_filter_future", future),
+            patch.object(gui, "_apply_displacement_filter") as apply,
+        ):
+            gui._poll_consistency_filter()
+            apply.assert_not_called()
+            root.after.assert_called_once_with(50, gui._poll_consistency_filter)
+            future.set_result(({(0, 4)}, 2))
+            gui._poll_consistency_filter()
+            self.assertEqual(gui.consistency_filter_pairs, {(0, 4)})
+            self.assertEqual(gui.consistency_filter_unavailable, 2)
+            apply.assert_called_once_with()
+
+    def test_enabling_filter_schedules_scoring_off_the_tk_thread(self):
+        root, executor, model, status = Mock(), Mock(), Mock(), Mock()
+        future = Future()
+        executor.submit.return_value = future
+        with (
+            patch.object(gui, "root", root, create=True),
+            patch.object(gui, "displacement_metric_executor", executor),
+            patch.object(gui, "consistency_threshold_var", Mock(get=lambda: 20), create=True),
+            patch.object(gui, "session_entry_a", Mock(get=lambda: "1"), create=True),
+            patch.object(gui, "session_entry_b", Mock(get=lambda: "2"), create=True),
+            patch.object(gui, "unusual_displacement_status_label", status, create=True),
+            patch.object(gui, "_unusual_filter_enabled", return_value=True),
+            patch.object(gui, "_get_displacement_context", return_value=(model, "", "probe")),
+            patch.object(gui, "get_ranked_unit_a_options", return_value=[[0, 4]]),
+            patch.object(gui, "_set_pair_controls") as controls,
+        ):
+            gui.update_unusual_displacement_filter()
+            model.score.assert_not_called()
+            self.assertIs(gui.consistency_filter_future, future)
+            self.assertEqual(executor.submit.call_args.args[:4], (
+                gui._compute_consistency_filter, [[0, 4]], model, 20,
+            ))
+            controls.assert_called_once_with(False)
+            root.after.assert_called_once_with(50, gui._poll_consistency_filter)
+            gui._cancel_consistency_filter()
+            self.assertTrue(future.cancelled())
+
+    def test_histogram_markers_update_without_rebuilding_canvas(self):
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+        fig = Figure()
+        canvas = FigureCanvasAgg(fig)
+        axis = fig.subplots()
+        axis.set_xlim(0, 1)
+        marker = axis.axvline(0.2, animated=True)
+        panel = gui._HistogramPanel(canvas, [marker], ("fixed",))
+        canvas.draw()
+        original_pixels = np.asarray(canvas.buffer_rgba()).copy()
+        with patch.object(canvas, "draw", wraps=canvas.draw) as draw:
+            panel.update([0.7])
+            draw.assert_not_called()
+        np.testing.assert_array_equal(marker.get_xdata(), [0.7, 0.7])
+        self.assertFalse(np.array_equal(original_pixels, np.asarray(canvas.buffer_rgba())))
+        panel._on_resize(None)
+        self.assertIsNone(panel.background)
+        canvas.draw()
+        self.assertIsNotNone(panel.background)
+
+    def test_raw_plot_reuses_channel_axes_for_another_partner(self):
+        line, canvas, figure = Mock(), Mock(), Mock()
+        key = (0, "Avg", id(gui.waveform), id(gui.channel_pos), gui.gui_scale)
+        with (
+            patch.object(gui, "raw_waveform_view_key", key),
+            patch.object(gui, "raw_waveform_pair_lines", [(0, line)]),
+            patch.object(gui, "raw_waveform_plot", Mock(), create=True),
+            patch.object(gui, "raw_waveform_canvas", canvas),
+            patch.object(gui, "raw_waveform_figure", figure),
+            patch.object(gui, "raw_displacement_axis", None),
+            patch.object(gui, "_widget_exists", return_value=True),
+            patch.object(gui, "_add_raw_displacement_overlay") as overlay,
+            patch.object(gui, "Figure") as create_figure,
+        ):
+            gui.plot_raw_waveforms(0, 5, "Avg")
+            create_figure.assert_not_called()
+            np.testing.assert_allclose(
+                line.set_ydata.call_args.args[0], gui.waveform[5, :, 0].mean(axis=-1),
+            )
+            overlay.assert_called_once_with(figure, 0, 5)
+            canvas.draw_idle.assert_called_once_with()
 
     def test_refresh_invalidates_and_reschedules_both_tables(self):
         tables = [

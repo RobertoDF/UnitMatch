@@ -36,6 +36,17 @@ displacement_metric_executor = None
 displacement_context = None
 displacement_context_key = None
 displacement_min_references = 20
+consistency_filter_threshold = 20.0
+consistency_filter_pairs = set()
+consistency_filter_unavailable = 0
+consistency_filter_cancel = Event()
+consistency_filter_future = None
+consistency_filter_after = None
+diagnostic_help_window = None
+histogram_panel = None
+raw_waveform_pair_lines = None
+raw_waveform_view_key = None
+pending_redraw = None
 score_histogram_cache = {}
 event_view_window = None
 event_view_refresh = None
@@ -341,8 +352,8 @@ class UnitATable(_DiagnosticUnitTable):
     """Candidate pairs colored by acceptance and better accepted alternatives."""
 
     columns = (
-        ("unit", "Unit A", 50), ("partner", "Best B", 50), ("status", "Pair status", 115),
-        ("angle", "Angle (deg)", 85), ("distance", "Dist (um)", 75), ("event_r", "Event r", 65),
+        ("unit", "Unit A", 45), ("partner", "Best B", 45), ("status", "Pair status", 115),
+        ("angle", "Angle (deg)", 70), ("distance", "Dist (um)", 60), ("event_r", "Event r", 60),
         ("displacement", "Disp. consistency", 145),
     )
     table_style = "UnitA.Treeview"
@@ -372,9 +383,9 @@ class UnitBTable(_DiagnosticUnitTable):
     """All Unit B candidates, with automatic OR/AND threshold eligibility."""
 
     columns = (
-        ("unit", "Unit B", 50), ("cv12", "P12", 50), ("cv21", "P21", 50),
-        ("angle", "Angle (deg)", 85), ("distance", "Dist (um)", 75),
-        ("event_r", "Event r", 65),
+        ("unit", "Unit B", 45), ("cv12", "P12", 45), ("cv21", "P21", 45),
+        ("angle", "Angle (deg)", 70), ("distance", "Dist (um)", 60),
+        ("event_r", "Event r", 60),
         ("displacement", "Disp. consistency", 145),
     )
     table_style = "UnitB.Treeview"
@@ -419,16 +430,48 @@ def create_unit_b_color_legend(master):
 
 
 def create_unit_b_diagnostic_legend(master):
-    return ttk.Label(
-        master,
-        text=(
-            "Angle: automatic mean. Dist: raw displacement.\n"
-            "Event r: shared-event PSTH correlation.\n"
-            "Disp. consistency: 0-100, not UM probability.\n"
-            "Hover for reference count and residual."
-        ),
-        wraplength=round(360 * gui_scale),
+    return ttk.Button(master, text="Columns and review help", command=open_diagnostic_help)
+
+
+def open_diagnostic_help():
+    global diagnostic_help_window
+    if diagnostic_help_window is not None and _widget_exists(diagnostic_help_window):
+        diagnostic_help_window.lift()
+        return
+    diagnostic_help_window = Toplevel(root)
+    diagnostic_help_window.title("UnitMatch columns and review help")
+    text = (
+        "Unit A diagnostics refer to that row's listed Best B. Unit B diagnostics "
+        "refer to the currently selected Unit A.\n\n"
+        "Pair status: accepted, a better-or-tied accepted alternative exists, or no "
+        "better accepted alternative exists. Unit B colors indicate automatic "
+        "OR/AND threshold eligibility, not final acceptance.\n\n"
+        "P12 / P21: original UM probabilities in each cross-validation direction.\n\n"
+        "Angle: degrees from the automatic-match mean displacement. Dist: raw "
+        "centroid displacement in micrometers. Dashed map rays remain +/-60 degrees "
+        "around the automatic mean; they no longer define the filter.\n\n"
+        "Event r: mean shared-event PSTH correlation using the Event Viewer settings. "
+        "Functional similarity alone does not establish identity.\n\n"
+        "Disp. consistency: 0-100 agreement with the robust displacement reference "
+        "of accepted matches, excluding both candidate endpoints. This is not UM "
+        "probability and does not change automatic matching. Hover over a value "
+        "for residual, normalized distance, reference count and scope. References "
+        "are probe-only unless shank IDs were supplied.\n\n"
+        "Low consistency filter: show Unit A rows whose listed Best B has a score "
+        "strictly below the chosen cutoff (default 20, a review heuristic, not a "
+        "calibrated threshold). Unit B alternatives remain available. Pending "
+        "and n/a results are not treated as low scores. The filter refreshes after "
+        "manual decisions.\n\n"
+        "Decisions are preserved in memory on reopening, not automatically saved "
+        "to disk. Accepting a new partner replaces competitors within that "
+        "session pair, not links to other sessions."
     )
+    ttk.Label(
+        diagnostic_help_window, text=text, wraplength=600, justify="left", padding=16,
+    ).pack(fill="both", expand=True)
+    ttk.Button(
+        diagnostic_help_window, text="Close", command=diagnostic_help_window.destroy,
+    ).pack(pady=(0, 12))
 
 
 def _get_displacement_context():
@@ -470,10 +513,16 @@ def _refresh_displacement_consistency():
     global displacement_context, displacement_context_key
     displacement_context = None
     displacement_context_key = None
+    filtering = _unusual_filter_enabled()
     for name in ("entry_a", "entry_b"):
         table = globals().get(name)
         if isinstance(table, _DiagnosticUnitTable) and _widget_exists(table):
-            table.refresh_displacement_metrics()
+            if filtering:
+                table._cancel_displacement_metrics()
+            else:
+                table.refresh_displacement_metrics()
+    if filtering:
+        update_unusual_displacement_filter()
 
 
 def _automatic_displacement_reference(unit_a, unit_b):
@@ -1152,6 +1201,8 @@ def run_GUI(*, preserve_decisions=True, block=True):
     global unusual_displacement_status_label
     global review_info_frame
     global displacement_context, displacement_context_key
+    global consistency_threshold_var, match_button, non_match_button
+    global diagnostic_help_window, histogram_panel, raw_waveform_view_key
 
     existing_root = globals().get("root")
     if existing_root is not None and _widget_exists(existing_root):
@@ -1178,6 +1229,9 @@ def run_GUI(*, preserve_decisions=True, block=True):
         not_match = []
     displacement_context = None
     displacement_context_key = None
+    diagnostic_help_window = None
+    histogram_panel = None
+    raw_waveform_view_key = None
     root = Tk()
     previous_colors = {
         key: rcParams[key]
@@ -1186,6 +1240,11 @@ def run_GUI(*, preserve_decisions=True, block=True):
 
     def close_gui():
         global event_metric_executor, displacement_metric_executor
+        global pending_redraw
+        _cancel_consistency_filter()
+        if pending_redraw is not None:
+            root.after_cancel(pending_redraw)
+            pending_redraw = None
         for table in (entry_a, entry_b):
             table._cancel_event_metrics()
             table._cancel_displacement_metrics()
@@ -1263,7 +1322,7 @@ def run_GUI(*, preserve_decisions=True, block=True):
 
     # Load the icon
     try:
-        icon = PhotoImage(file=icon_path)
+        icon = PhotoImage(master=root, file=icon_path)
         # Set the icon photo
         root.iconphoto(False, icon)
     except Exception as e:
@@ -1309,9 +1368,9 @@ def run_GUI(*, preserve_decisions=True, block=True):
 
     # select CV
     CV_options = [("Avg", 0), ("(1,2)", 1), ("(2,1)", 2)]
-    CV_tkinter = IntVar()
+    CV_tkinter = IntVar(master=root)
     CV_tkinter.set(0)
-    label_cv = ttk.Label(entry_frame, text="Select the cv option")
+    label_cv = ttk.Label(entry_frame, text="CV")
     for i, option in enumerate(CV_options):
         RadioCV = ttk.Radiobutton(
             entry_frame,
@@ -1321,17 +1380,27 @@ def run_GUI(*, preserve_decisions=True, block=True):
             command=update_unit_cv,
         ).grid(row=i + 1, column=0)
 
-    toggle_unusual_displacement_val = BooleanVar(value=False)
+    toggle_unusual_displacement_val = BooleanVar(master=root, value=False)
+    consistency_threshold_var = DoubleVar(master=root, value=consistency_filter_threshold)
+    filter_controls = ttk.Frame(entry_frame)
     unusual_displacement_toggle = ttk.Checkbutton(
-        entry_frame,
-        text=f"Unusual displacement (>{DISPLACEMENT_ANGLE_THRESHOLD} degrees)",
+        filter_controls,
+        text="Low displacement consistency <",
         variable=toggle_unusual_displacement_val,
         command=update_unusual_displacement_filter,
     )
+    unusual_displacement_toggle.pack(side="left")
+    cutoff_entry = ttk.Spinbox(
+        filter_controls, from_=0, to=100, increment=5, width=5,
+        textvariable=consistency_threshold_var, command=update_unusual_displacement_filter,
+    )
+    cutoff_entry.pack(side="left", padx=4)
+    cutoff_entry.bind("<Return>", lambda event: update_unusual_displacement_filter())
+    cutoff_entry.bind("<FocusOut>", lambda event: update_unusual_displacement_filter())
     unusual_displacement_status_label = ttk.Label(
         entry_frame,
         text=(
-            "Off: filter uses automatic matches on the same probe/session pair"
+            "Filter off"
         ),
         wraplength=round(360 * gui_scale),
     )
@@ -1390,7 +1459,7 @@ def run_GUI(*, preserve_decisions=True, block=True):
     session_entry_b.grid(row=1, column=4, padx=15)
     entry_a.grid(row=2, column=1, columnspan=2, stick="WE", padx=5)
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
-    unusual_displacement_toggle.grid(
+    filter_controls.grid(
         row=3,
         column=1,
         columnspan=2,
@@ -1404,16 +1473,8 @@ def run_GUI(*, preserve_decisions=True, block=True):
         sticky="W",
         padx=5,
     )
-    unit_a_color_legend.grid(
-        row=5,
-        column=1,
-        columnspan=2,
-        sticky="W",
-        padx=5,
-    )
-    unit_b_color_legend.grid(row=6, column=1, columnspan=2, sticky="W", padx=5)
-    unit_b_diagnostic_legend.grid(row=7, column=1, columnspan=2, sticky="W", padx=5)
-    swap_button.grid(row=8, column=1, columnspan=2, sticky="WE")
+    unit_b_diagnostic_legend.grid(row=5, column=1, columnspan=2, sticky="WE", padx=5)
+    swap_button.grid(row=6, column=1, columnspan=2, sticky="WE")
     ######################################################################################
 
     # MatchButtons
@@ -1446,9 +1507,9 @@ def run_GUI(*, preserve_decisions=True, block=True):
 
     # Toggle Plots
     ######################################################################################
-    toggle_raw_val = BooleanVar()
-    toggle_UM_score_val = BooleanVar()
-    toggle_acg_val = BooleanVar()
+    toggle_raw_val = BooleanVar(master=root)
+    toggle_UM_score_val = BooleanVar(master=root)
+    toggle_acg_val = BooleanVar(master=root)
     toggle_raw_val.set(False)
     toggle_UM_score_val.set(False)
     toggle_acg_val.set(False)
@@ -1572,6 +1633,7 @@ def process_info_for_GUI(
     global unusual_displacement_group_info
     global event_correlation_cache
     global displacement_min_references, displacement_context, displacement_context_key
+    global histogram_panel, raw_waveform_view_key
     if (
         isinstance(displacement_min_references_in, (bool, np.bool_))
         or not isinstance(displacement_min_references_in, (int, np.integer))
@@ -1579,6 +1641,9 @@ def process_info_for_GUI(
     ):
         raise ValueError("displacement_min_references_in must be an integer of at least 3")
     displacement_min_references = int(displacement_min_references_in)
+    _cancel_consistency_filter()
+    histogram_panel = None
+    raw_waveform_view_key = None
     displacement_context = None
     displacement_context_key = None
     for name in ("entry_a", "entry_b"):
@@ -1704,15 +1769,6 @@ def get_ranked_unit_a_options(session_a, session_b, unusual_only=None):
         & (session_switch[session_b - 1] <= review_matches[:, 1])
         & (review_matches[:, 1] < session_switch[session_b])
     ]
-    if unusual_only:
-        pairs = np.asarray(
-            [
-                pair
-                for pair in pairs
-                if tuple(map(int, pair)) in unusual_displacement_pairs
-            ],
-            dtype=int,
-        ).reshape(-1, 2)
     options = []
     seen_unit_a = set()
     for unit_a, unit_b in pairs:
@@ -1720,6 +1776,8 @@ def get_ranked_unit_a_options(session_a, session_b, unusual_only=None):
         if unit_a not in seen_unit_a:
             options.append([unit_a, int(unit_b)])
             seen_unit_a.add(unit_a)
+    if unusual_only:
+        options = [pair for pair in options if tuple(pair) in consistency_filter_pairs]
     if not options and unusual_only:
         return []
     if not options:
@@ -2189,10 +2247,21 @@ def get_spike_times_for_unit(unit_id):
 
 
 def update(event):
+    """Coalesce queued navigation events before redrawing the selected pair."""
+    global pending_redraw
+    if pending_redraw is not None:
+        root.after_cancel(pending_redraw)
+    pending_redraw = root.after_idle(_render_selected_pair)
+
+
+def _render_selected_pair():
     """
     Updates the GUI.
     """
-
+    global pending_redraw
+    pending_redraw = None
+    if not entry_a.get() or not entry_b.get():
+        return
     unit_a = int(entry_a.get())
     unit_b = int(entry_b.get())
 
@@ -2253,6 +2322,8 @@ def up_options_b_list(event):
     global option_b
     global entry_b
 
+    if not option_b or not entry_b.get():
+        return "break"
     tmp_entry_b = int(entry_b.get())
     current_idx = option_b.index(tmp_entry_b)
     if current_idx == 0:
@@ -2271,6 +2342,8 @@ def down_options_b_list(event):
     global option_b
     global entry_b
 
+    if not option_b or not entry_b.get():
+        return "break"
     tmp_entry_b = int(entry_b.get())
     current_idx = option_b.index(tmp_entry_b)
     if current_idx == (len(option_b) - 1):
@@ -2319,45 +2392,100 @@ def get_cv_option():
 
 # These are the function used to selct units, including how the CV selctition radio buttons, session selction, unitselection andmoving left and rigthfor next units
 def _unusual_filter_status(session_a, session_b, option_count):
-    if raw_avg_centroid is None:
-        return "Unavailable: raw centroids were not provided"
-
-    session_ids = np.asarray(clus_info["session_id"])
-    first_a = session_switch[session_a - 1]
-    first_b = session_switch[session_b - 1]
-    actual_a = int(session_ids[first_a])
-    actual_b = int(session_ids[first_b])
-    session_key = tuple(sorted((actual_a, actual_b)))
-    group_info = [
-        info
-        for (group_a, group_b, _), info in unusual_displacement_group_info.items()
-        if (group_a, group_b) == session_key
-    ]
-    if not group_info:
-        return "No cross-session automatic matches with raw displacement"
-    if option_count:
-        pair_count = sum(info["flagged_count"] for info in group_info)
-        return (
-            f"{pair_count} unusual automatic pair(s): "
-            f">{DISPLACEMENT_ANGLE_THRESHOLD} degrees from automatic-match mean"
-        )
-    if not any(info["mean_defined"] for info in group_info):
-        excluded_nonfinite = sum(
-            info["excluded_nonfinite"] for info in group_info
-        )
-        excluded_zero = sum(info["excluded_zero"] for info in group_info)
-        return (
-            "Undefined automatic-match mean direction "
-            f"(nonfinite={excluded_nonfinite}, zero={excluded_zero})"
-        )
     return (
-        "No unusual automatic matches: "
-        f"none are >{DISPLACEMENT_ANGLE_THRESHOLD} degrees from the automatic-match mean"
+        f"{option_count} Unit A rows below {consistency_filter_threshold:g}; "
+        f"{consistency_filter_unavailable} n/a excluded"
     )
 
 
+def _cancel_consistency_filter():
+    global consistency_filter_after
+    consistency_filter_cancel.set()
+    if consistency_filter_future is not None:
+        consistency_filter_future.cancel()
+    if consistency_filter_after is not None:
+        root.after_cancel(consistency_filter_after)
+        consistency_filter_after = None
+
+
+def _compute_consistency_filter(options, model, threshold, cancel):
+    selected, unavailable = set(), 0
+    for unit_a, unit_b in options:
+        if cancel.is_set():
+            return None
+        result = model.score(unit_a, unit_b)
+        if result.score is None:
+            unavailable += 1
+        elif result.score < threshold:
+            selected.add((unit_a, unit_b))
+    return selected, unavailable
+
+
+def _set_pair_controls(enabled):
+    for name in ("match_button", "non_match_button"):
+        button = globals().get(name)
+        if button is not None and _widget_exists(button):
+            button.configure(state="normal" if enabled else "disabled")
+
+
 def update_unusual_displacement_filter():
-    """Apply or clear the unusual automatic-displacement selector filter."""
+    """Fit/filter in the worker; never block Tk on robust covariance fitting."""
+    global consistency_filter_cancel, consistency_filter_future, consistency_filter_after
+    global displacement_metric_executor, consistency_filter_threshold
+    _cancel_consistency_filter()
+    try:
+        threshold = float(consistency_threshold_var.get())
+    except (TclError, ValueError):
+        _set_pair_controls(bool(entry_a.get() and entry_b.get()))
+        unusual_displacement_status_label.configure(text="Enter a cutoff between 0 and 100")
+        return
+    if not np.isfinite(threshold) or not 0 <= threshold <= 100:
+        _set_pair_controls(bool(entry_a.get() and entry_b.get()))
+        unusual_displacement_status_label.configure(text="Enter a cutoff between 0 and 100")
+        return
+    consistency_filter_threshold = threshold
+    if not _unusual_filter_enabled():
+        _apply_displacement_filter()
+        return
+    model, reason, _ = _get_displacement_context()
+    if model is None:
+        toggle_unusual_displacement_val.set(False)
+        _apply_displacement_filter()
+        unusual_displacement_status_label.configure(text=f"Unavailable: {reason}")
+        return
+    options = get_ranked_unit_a_options(
+        int(session_entry_a.get()), int(session_entry_b.get()), unusual_only=False,
+    )
+    consistency_filter_cancel = Event()
+    _set_pair_controls(False)
+    unusual_displacement_status_label.configure(text="Calculating consistency filter...")
+    if displacement_metric_executor is None:
+        displacement_metric_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="unitmatch-displacement",
+        )
+    consistency_filter_future = displacement_metric_executor.submit(
+        _compute_consistency_filter, options, model, threshold, consistency_filter_cancel,
+    )
+    consistency_filter_after = root.after(50, _poll_consistency_filter)
+
+
+def _poll_consistency_filter():
+    global consistency_filter_after, consistency_filter_pairs, consistency_filter_unavailable
+    consistency_filter_after = None
+    if not consistency_filter_future.done():
+        consistency_filter_after = root.after(50, _poll_consistency_filter)
+        return
+    error = consistency_filter_future.exception()
+    if error is not None:
+        _set_pair_controls(True)
+        unusual_displacement_status_label.configure(text=f"Consistency filter failed: {error}")
+    result = consistency_filter_future.result()
+    if result is not None:
+        consistency_filter_pairs, consistency_filter_unavailable = result
+        _apply_displacement_filter()
+
+
+def _apply_displacement_filter():
     global match_idx
     global option_a
     global option_b
@@ -2374,6 +2502,7 @@ def update_unusual_displacement_filter():
         unusual_only=unusual_only,
     )
     entry_a.set_options(get_unit_a_display_options())
+    _set_pair_controls(bool(option_a))
     if not option_a:
         option_b = []
         entry_a.set("")
@@ -2418,8 +2547,7 @@ def update_unusual_displacement_filter():
     else:
         unusual_displacement_status_label.configure(
             text=(
-                "Off: filter uses automatic matches on the same "
-                "probe/session pair"
+                "Filter off"
             )
         )
     color_unit_a_options()
@@ -2911,9 +3039,9 @@ def open_event_view():
 
     controls = ttk.Frame(event_view_window, padding=8)
     controls.pack(fill=X)
-    before_var = StringVar(value=str(event_view_settings[0]))
-    after_var = StringVar(value=str(event_view_settings[1]))
-    bin_size_var = StringVar(value=str(event_view_settings[2]))
+    before_var = StringVar(master=event_view_window, value=str(event_view_settings[0]))
+    after_var = StringVar(master=event_view_window, value=str(event_view_settings[1]))
+    bin_size_var = StringVar(master=event_view_window, value=str(event_view_settings[2]))
     for column, (label, variable) in enumerate(
         (
             ("Before (s)", before_var),
@@ -3085,12 +3213,15 @@ def open_pair_lookup():
         ).grid(row=0, column=column, padx=8, pady=(8, 4))
 
         session_variable = IntVar(
+            master=pair_lookup_window,
             value=int(clus_info["session_indices"][row_index]) + 1
         )
         probe_variable = IntVar(
+            master=pair_lookup_window,
             value=int(clus_info["probe_numbers"][row_index])
         )
         unit_variable = StringVar(
+            master=pair_lookup_window,
             value=str(clus_info["analyzer_unit_ids"][row_index])
         )
         session_variables.append(session_variable)
@@ -3344,6 +3475,9 @@ def _accept_pair(unit_a, unit_b):
 
 
 def set_match(event=None):
+    if not entry_a.get() or not entry_b.get():
+        warnings.warn("Select a pair before accepting a match.", RuntimeWarning)
+        return
     unit_a = int(entry_a.get())
     unit_b = int(entry_b.get())
     _accept_pair(unit_a, unit_b)
@@ -3356,6 +3490,9 @@ def set_match(event=None):
 def set_not_match(event=None):
     global is_match
     global not_match
+    if not entry_a.get() or not entry_b.get():
+        warnings.warn("Select a pair before rejecting a match.", RuntimeWarning)
+        return
     unit_a = int(entry_a.get())
     unit_b = int(entry_b.get())
 
@@ -3925,9 +4062,26 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
     global raw_waveform_figure
     global raw_waveform_canvas
     global raw_displacement_axis
+    global raw_waveform_pair_lines, raw_waveform_view_key
+    view_key = (unit_a, str(CV), id(waveform), id(channel_pos), gui_scale)
+    if raw_waveform_view_key == view_key and _widget_exists(raw_waveform_plot):
+        for channel, line in raw_waveform_pair_lines:
+            values = (
+                waveform[unit_b, :, channel].mean(axis=-1)
+                if CV == "Avg" else waveform[unit_b, :, channel, CV[1]]
+            )
+            line.set_ydata(values.squeeze())
+        if raw_displacement_axis is not None:
+            raw_displacement_axis.remove()
+        raw_displacement_axis = None
+        _add_raw_displacement_overlay(raw_waveform_figure, unit_a, unit_b)
+        raw_waveform_canvas.draw_idle()
+        return
     if raw_waveform_plot.winfo_exists() == 1:
         raw_waveform_plot.destroy()
     raw_displacement_axis = None
+    raw_waveform_pair_lines = []
+    raw_waveform_view_key = view_key
 
     fig = Figure(figsize=_scaled_figsize(4, 8), dpi=100)
     raw_waveform_figure = fig
@@ -4029,7 +4183,7 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
                 waveform[unit_a, :, good_channel].mean(axis=-1).squeeze(),
                 color=UNIT_A_COLOR,
             )
-            ax.plot(
+            partner_line, = ax.plot(
                 waveform[unit_b, :, good_channel].mean(axis=-1).squeeze(),
                 color=UNIT_B_COLOR,
                 lw=0.8,
@@ -4039,11 +4193,12 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
                 waveform[unit_a, :, good_channel, CV[0]].squeeze(),
                 color=UNIT_A_COLOR,
             )
-            ax.plot(
+            partner_line, = ax.plot(
                 waveform[unit_b, :, good_channel, CV[1]].squeeze(),
                 color=UNIT_B_COLOR,
                 lw=0.8,
             )
+        raw_waveform_pair_lines.append((good_channel, partner_line))
         ax.set_ylim(sub_min_y, sub_max_y)
         ax.set_axis_off()
 
@@ -4091,9 +4246,45 @@ def _set_histogram_y_limits(axis, *histograms):
     axis.set_ylim(0, peak * 1.08)
 
 
-def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, unit_b):
+class _HistogramPanel:
+    """Keep static histograms rasterized; redraw only current-pair markers."""
 
+    def __init__(self, canvas, markers, key):
+        self.canvas = canvas
+        self.markers = markers
+        self.key = key
+        self.background = None
+        canvas.mpl_connect("draw_event", self._on_draw)
+        canvas.mpl_connect("resize_event", self._on_resize)
+
+    def _on_resize(self, event):
+        self.background = None
+
+    def _on_draw(self, event):
+        self.background = self.canvas.copy_from_bbox(self.canvas.figure.bbox)
+        for marker in self.markers:
+            marker.axes.draw_artist(marker)
+
+    def update(self, values):
+        for marker, value in zip(self.markers, values):
+            marker.set_xdata([value, value])
+        if self.background is None:
+            self.canvas.draw_idle()
+        else:
+            self.canvas.restore_region(self.background)
+            for marker in self.markers:
+                marker.axes.draw_artist(marker)
+            self.canvas.blit(self.canvas.figure.bbox)
+
+
+def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, unit_b):
     global hist_plot
+    global histogram_panel
+    key = (id(scores_to_include), tuple(hist_names), id(hist), id(hist_matched))
+    values = [scores_to_include[name][unit_a, unit_b] for name in hist_names]
+    if histogram_panel is not None and histogram_panel.key == key and _widget_exists(hist_plot):
+        histogram_panel.update(values)
+        return
     if hist_plot.winfo_exists() == 1:
         hist_plot.destroy()
 
@@ -4105,6 +4296,7 @@ def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, u
     fig.patch.set_facecolor("#33393b")
     axs = fig.subplots(3, 2, sharex="col")
     axs = axs.flat
+    markers = []
 
     # Create title mapping
     title_mapping = {
@@ -4138,17 +4330,20 @@ def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, u
         axs[i].set_ylabel("Density", fontsize=_scaled_font_size(10))
         _set_histogram_y_limits(axs[i], hist[i], hist_matched[i])
 
-        axs[i].axvline(
-            scores_to_include[hist_names[i]][unit_a, unit_b],
+        marker = axs[i].axvline(
+            values[i],
             ls="--",
             color="white",
             label="Current match pair" if i == 0 else "",
+            animated=True,
         )
+        markers.append(marker)
         axs[i].set_facecolor("#2d2d2d")
 
-    hist_plot = FigureCanvasTkAgg(fig, master=root)
-    hist_plot.draw()
-    hist_plot = hist_plot.get_tk_widget()
+    canvas = FigureCanvasTkAgg(fig, master=root)
+    histogram_panel = _HistogramPanel(canvas, markers, key)
+    canvas.draw()
+    hist_plot = canvas.get_tk_widget()
 
     hist_plot.grid(
         row=2,

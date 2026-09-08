@@ -258,13 +258,13 @@ class GuiStartupTests(unittest.TestCase):
             for cv_value in (0, 1, 2):
                 cv_variable.get.return_value = cv_value
                 toggle.get.return_value = True
-                gui.update(None)
+                gui._render_selected_pair()
             self.assertEqual(gui.score_histogram_cache, {})
             plot.assert_not_called()
             toggle.get.return_value = False
             for cv_value in (0, 1, 2):
                 cv_variable.get.return_value = cv_value
-                gui.update(None)
+                gui._render_selected_pair()
                 expected = (
                     gui.scores_to_include_avg if cv_value == 0
                     else gui.scores_to_include_GUI[cv_value - 1]

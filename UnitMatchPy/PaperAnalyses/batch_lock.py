@@ -36,8 +36,7 @@ def sentinel_is_fresh(sentinel_path, redo_from_date=None):
     of a plain os.path.isfile() so batch scripts can recover from an algorithm
     change without a blanket REDO=True (which forces every group through the
     lock/reprocess path, including ones a concurrent run already redid since
-    the change -- see run_deepunitmatch_batch_onMerged.py's module docstring
-    for the incident this was added for).
+    the change).
 
     redo_from_date : datetime.datetime or None
         If None, only existence is checked (classic "skip if present"

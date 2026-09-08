@@ -1029,7 +1029,7 @@ def filter_good_units(mouse, probe, loc, conn, waveforms, session_switch, param)
 
 
 def get_unit_id(filepath: str):
-    "This version of get_unit_id is mostly for internal use. The DeepUnitMatch.ipynb notebook uses the one in DeepUnitMatch/utils/helpers.py"
+    "This version of get_unit_id is mostly for internal use."
     fp = os.path.basename(filepath)
     if fp[:4] == "Unit" and fp[-14:] == "_RawSpikes.npy":
         fp = fp.replace("Unit", "")

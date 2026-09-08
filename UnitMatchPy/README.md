@@ -1,22 +1,19 @@
-# UnitMatchPy and DeepUnitMatch
+# UnitMatchPy
 
 This repository contains:
 - **UnitMatchPy**: automatic matching of neurons across sessions (Python package).
-- **DeepUnitMatch**: DeepUnitMatch pipeline and demos (see preprint below).
 
 ## References
 
 - **UnitMatch:** https://www.nature.com/articles/s41592-024-02440-1
-- **DeepUnitMatch preprint:** https://www.biorxiv.org/content/10.64898/2026.01.30.702777v1
 
 ## Versions
 
 - **UnitMatchPy version:** `3.5.0` (from `pyproject.toml`)
-- **DeepUnitMatch:** code lives under `DeepUnitMatch/` (see **DeepUnitMatch (DUM)** section)
 
 ## System requirements
 
-Both UnitMatchPy and DeepUnitMatch can be ran on a standard computer, with sufficient RAM (>32GB for large datasets). 
+UnitMatchPy can run on a standard computer with sufficient RAM (>32GB for large datasets).
 This software is supported for Windows and macOS, and has been tested on Windows 11.
 
 ## Installation
@@ -30,36 +27,6 @@ We recommend using Anaconda/Miniconda (conda) to create an isolated environment 
 conda create -n UMPy python=3.11 pip #(press y when prompted)
 conda activate UMPy
 ```
-
-### GPU (CUDA) users: install this first
-
-Skip this if you're on macOS (no CUDA) or don't have an NVIDIA GPU -- Option A/B below
-will just install the CPU build automatically, no extra steps needed.
-
-If you do have an NVIDIA GPU (Windows/Linux) and want DeepUnitMatch to run on it, install
-the CUDA-enabled PyTorch build **before** Option A or B below:
-
-```bash
-pip install --extra-index-url https://download.pytorch.org/whl/cu126 torch
-```
-
-(if you've cloned this repo, `pip install -r requirements-cuda.txt` from this folder does
-the same thing). Do this first because plain `pip install UnitMatchPy` / `pip install -e .`
-alone always installs the CPU-only build -- PyPI's default `torch` wheel is CPU-only, and
-pip has no way to detect that a GPU is present. Once torch is already installed and
-satisfies the version range Option A/B ask for, they'll leave it alone instead of
-overwriting it with the CPU build.
-
-Verify it worked:
-
-```bash
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
-
-This should print a version ending in `+cuXXX` (not `+cpu`) and `True`. If it's not, see
-`pyproject.toml`'s `torch` dependency comment, or check `nvidia-smi` shows a working driver.
-
-Then install using pip (options below). This step should take less than few minutes.
 
 ### Option A: Install the released package (PyPI)
 
@@ -118,8 +85,8 @@ Both Tk unit tables show raw displacement magnitude in micrometers, the angle
 from the automatic-match mean for the same probe and session pair, and event
 response correlation. Unit A metrics refer to each row's listed Best B partner;
 Unit B metrics refer to its pairing with the currently selected Unit A. Unit B
-also shows threshold eligibility and both CV probabilities. Dashed rays show the 60-degree
-boundaries used by the unusual-displacement filter, which filters Unit A only.
+also shows threshold eligibility and both CV probabilities. Dashed rays show a
+60-degree visual reference around the automatic mean, not the filter threshold.
 Zero-length displacement or an undefined reference direction has no angle.
 
 Both tables also show **Disp. consistency**, a post-hoc 0-100 displacement
@@ -129,6 +96,14 @@ or automatic matches. Hover over a value for the residual, normalized distance,
 reference count, and scope; `n/a` includes an explanation. Fits are cached and
 computed in a separate background worker, even without event data, and refresh
 after manual decisions.
+
+The **Low displacement consistency** toggle filters Unit A by the score of its
+listed Best B, strictly below the adjustable cutoff (initially 20). It excludes
+`n/a` scores and leaves every Unit B alternative accessible. Filtering is
+asynchronous and refreshes after decisions. Column definitions and color meanings
+are available from **Columns and review help**, rather than filling the main
+window. Histogram backgrounds and raw-channel panels are reused during partner
+navigation, and queued redraws are coalesced.
 
 The default minimum is 20 usable reference pairs after exclusions; set
 `displacement_min_references_in=20` in `gui.process_info_for_GUI(...)` to
@@ -160,15 +135,3 @@ memory, not on disk. Use `preserve_decisions=False` only to deliberately start
 a fresh review after closing the window. Accepting a new partner rejects
 accepted competitors at either endpoint within the same session pair, not links
 to other sessions.
-
-### Run DeepUnitMatch 
-
-To try the DeepUnitMatch version, start with:
-- `Demo Notebooks/DeepUnitMatch.ipynb`
-
-It should take just a few minutes to run on a standard PC. 
-
-If you want to train / fine-tune a model on your own data, see:
-- `Demo Notebooks/DUM_training.ipynb`
-
-Important note: DeepUnitMatch current trained model is for Npix 2.0 4-shank only. You will need to train a new model with your own data if you have any other type of probe. (For example, Mouse2 from the figshare data is a Npix 1 dataset, you'll notice the trained model won't give good results on this mouse for that reason.)

@@ -388,13 +388,12 @@ def test_unusual_filter_restricts_only_unit_a_options(monkeypatch):
     )
     monkeypatch.setattr(
         gui,
-        "unusual_displacement_pairs",
+        "consistency_filter_pairs",
         {(0, 4), (4, 0), (1, 5), (5, 1)},
         raising=False,
     )
 
     assert gui.get_ranked_unit_a_options(1, 2, unusual_only=True) == [
-        [0, 4],
         [1, 5],
     ]
     assert gui.get_ranked_unit_b_options(0, 2) == [3, 4, 5]
@@ -428,7 +427,7 @@ def test_unusual_filter_handles_no_flagged_pairs(monkeypatch):
     )
     monkeypatch.setattr(
         gui,
-        "unusual_displacement_pairs",
+        "consistency_filter_pairs",
         set(),
         raising=False,
     )

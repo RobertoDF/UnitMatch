@@ -3,10 +3,8 @@
 UnitMatch matches electrophysiological units within and across recording
 sessions using waveform and spatial features.
 
-This repository contains the Python implementations:
-
-- **UnitMatchPy** for probabilistic unit matching and manual review.
-- **DeepUnitMatch** for deep-learning-based matching.
+This branch contains **UnitMatchPy** for probabilistic unit matching and manual
+review, focused on SpikeInterface workflows.
 
 This fork is maintained by Roberto ([@RobertoDF](https://github.com/RobertoDF))
 and focuses on SpikeInterface integration and interactive unit review.
@@ -23,9 +21,9 @@ the original MATLAB implementation.
 | --- | --- |
 | SpikeInterface integration | Export UnitMatch inputs from prepared sorting analyzers, review within-session merge groups, and save curated analyzers explicitly. Shared diagnostic helpers reuse stored waveform samples rather than computing extensions during review. |
 | Manual review | Scrollable, color-coded Unit A and Unit B tables; separate session and CV selection; explicit green **Set as Match** and red **Set as Non Match** buttons; selectable original unit/probe identities and pair lookup. |
-| Spatial diagnostics | Raw displacement magnitude, angle, and **Disp. consistency** in both tables. The new post-hoc consistency score compares displacement against a robust reference of currently accepted pairs without changing UM probability. A larger equal-scale displacement map and dashed 60-degree automatic-mean boundaries support visual review. The unusual-displacement filter affects Unit A only. |
+| Spatial diagnostics | Raw displacement magnitude, angle, and **Disp. consistency** in both tables. The post-hoc consistency score compares displacement against a robust accepted reference without changing UM probability. An adjustable low-consistency filter affects Unit A only; every Unit B alternative remains available. |
 | Event responses | A linked Event Viewer compares event-aligned firing rates. Both tables show cached, asynchronously computed shared-event PSTH correlations without changing match probabilities or decisions. |
-| Plotting and notebooks | Wider average waveforms, larger raw-waveform and score panels, visible legend handles, spike-aware histogram scaling, and nonblocking IPython/Tk review. Reopening an active review focuses the existing window. |
+| Plotting and notebooks | Cached histogram backgrounds and reusable raw-waveform panels avoid rebuilding plots on every partner change. Navigation redraws are coalesced. Column explanations live behind **Columns and review help**. Nonblocking IPython/Tk review preserves an active window rather than opening duplicates. |
 
 Upstream already provides waveform/spatial matching, manual review, and functional
 validation tools. The additions above extend that workflow; they are not a new
@@ -56,8 +54,15 @@ bias later analyses of functional stability or plasticity.
 
 **Disp. consistency** is a post-hoc 0-100 similarity score, **not a match
 probability, p-value, or seventh input to UnitMatch**. The original six scores,
-UM probabilities, ranking, automatic decisions, and automatic-mean angle filter
-are unchanged.
+UM probabilities, ranking, and automatic decisions are unchanged.
+
+The **Low displacement consistency** toggle shows Unit A rows whose listed
+Best B has a score strictly below the adjustable cutoff (default **20**).
+Missing/undefined scores are excluded, not treated as zero. The cutoff is a
+review heuristic, not a calibrated identity threshold. Filtering runs in the
+background and refreshes after decisions. It does not change the listed best
+partner or restrict Unit B alternatives. The map's dashed 60-degree rays remain
+a visual reference around the automatic mean, not the filter criterion.
 
 The diagnostic uses raw XY centroid displacement before drift correction,
 averaged over the two waveform halves. Its reference includes all currently
@@ -126,18 +131,16 @@ cd UnitMatchPy
 pip install -e ".[full,notebooks]"
 ```
 
-See [UnitMatchPy/README.md](UnitMatchPy/README.md) for requirements, GPU setup,
+See [UnitMatchPy/README.md](UnitMatchPy/README.md) for requirements,
 demo notebooks, and detailed usage.
 
 ## References
 
 - [UnitMatch paper](https://www.nature.com/articles/s41592-024-02440-1)
-- [DeepUnitMatch preprint](https://www.biorxiv.org/content/10.64898/2026.01.30.702777v1)
 - [Original UnitMatch repository](https://github.com/EnnyvanBeest/UnitMatch)
 
 Original UnitMatch was developed by Enny H. van Beest and Celian Bimbard.
-UnitMatchPy was developed by Sam Dodgson. DeepUnitMatch was developed by
-Wentao Qiu and Suyash Agarwal.
+UnitMatchPy was developed by Sam Dodgson.
 
 ## License
 
