@@ -81,6 +81,27 @@ Example notebooks:
 
 The GUI is an optional step to curate and explore UnitMatch outputs; see `Demo Notebooks/GUI_Reference_Guide.md` for usage tips and shortcuts.
 
+UnitData and UM Scores appear side by side, with read-only columns sized to
+their contents so both tables' rows and values remain visible together.
+
+The summary beside **Set as Match** shows accepted pairs between the selected
+sessions, total loaded units in each, and uniquely matched units with percentages.
+It includes automatic and manual accepts minus explicit rejections, counts
+reciprocal pairs once, and is independent of the display filter. Percentages use
+the units loaded into the review, not all units originally produced by sorting.
+
+The adjacent compact breakdown shows accepted pair counts and unique matched /
+total units for each probe, split by actual shank IDs when supplied. Scroll it
+for additional groups; `?` means missing metadata, not an inferred shank.
+Counts update with manual decisions and never exclude unreviewed units from
+the totals. Cross-group accepted links, if present, are shown separately.
+
+Unpack the review outputs as `is_match, not_match = gui.run_GUI(...)`.
+Only the live manual accept/reject lists are returned. After reviewing, combine
+your original automatic matches with manual accepts and remove manual rejects
+to produce the curated matches. With `block=False`, rerun that curation step if
+you change labels afterward.
+
 Both Tk unit tables show raw displacement magnitude in micrometers, the angle
 from the automatic-match mean for the same probe and session pair, and event
 response correlation. Unit A metrics refer to each row's listed Best B partner;
@@ -88,6 +109,16 @@ Unit B metrics refer to its pairing with the currently selected Unit A. Unit B
 also shows threshold eligibility and both CV probabilities. Dashed rays show a
 60-degree visual reference around the automatic mean, not the filter threshold.
 Zero-length displacement or an undefined reference direction has no angle.
+
+Unit A's listed **Best B** stays fixed when accepting a different partner; manual
+acceptance does not rerank candidates or change their scores. An accepted listed
+pair is green. Otherwise, an accepted alternative B for that same A and session
+pair makes the row purple (**Alternative match accepted**), even with a lower
+average probability. A different A claiming the listed B makes the row purple
+only when its finite average probability is at least the listed pair's (or the
+listed probability is nonfinite). Browsing alone does not count as acceptance;
+explicitly rejected alternatives and links to other session pairs do not count.
+Without a qualifying accepted alternative, the row remains red.
 
 Both tables also show **Disp. consistency**, a post-hoc 0-100 displacement
 similarity score based on the currently accepted reference, excluding pairs
@@ -105,8 +136,8 @@ are available from **Columns and review help**, rather than filling the main
 window. Histogram backgrounds and raw-channel panels are reused during partner
 navigation, and queued redraws are coalesced.
 
-The default minimum is 20 usable reference pairs after exclusions; set
-`displacement_min_references_in=20` in `gui.process_info_for_GUI(...)` to
+The default minimum is 5 usable reference pairs after exclusions; set
+`displacement_min_references_in=5` in `gui.process_info_for_GUI(...)` to
 configure it. Reference groups use session pair and probe, plus per-unit
 `clus_info["shank_ids"]` when supplied. Without those IDs the tooltip explicitly
 labels the reference as probe-only. See the

@@ -1,9 +1,11 @@
 from tkinter import *
 from tkinter import ttk
+from tkinter import font as tkfont
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.lines import Line2D
 import numpy as np
+import pandas as pd
 from matplotlib import rcParams
 import os
 import pickle
@@ -35,7 +37,7 @@ event_metric_executor = None
 displacement_metric_executor = None
 displacement_context = None
 displacement_context_key = None
-displacement_min_references = 20
+displacement_min_references = 5
 consistency_filter_threshold = 20.0
 consistency_filter_pairs = set()
 consistency_filter_unavailable = 0
@@ -47,6 +49,9 @@ histogram_panel = None
 raw_waveform_pair_lines = None
 raw_waveform_view_key = None
 pending_redraw = None
+session_summary_label = None
+session_group_summary = None
+unit_tables_frame = None
 score_histogram_cache = {}
 event_view_window = None
 event_view_refresh = None
@@ -370,7 +375,10 @@ class UnitATable(_DiagnosticUnitTable):
     def set_review_status(self, unit, category):
         labels = {
             "accepted": ("Accepted", APPROVED_MATCH_COLOR),
-            "better_alternative": ("Better match exists", BETTER_ALTERNATIVE_COLOR),
+            "better_alternative": (
+                "Alternative match accepted",
+                BETTER_ALTERNATIVE_COLOR,
+            ),
             "no_alternative": ("No better match", NO_ACCEPTED_ALTERNATIVE_COLOR),
         }
         label, color = labels[category]
@@ -441,6 +449,11 @@ def open_diagnostic_help():
     diagnostic_help_window = Toplevel(root)
     diagnostic_help_window.title("UnitMatch columns and review help")
     text = (
+        "Session summary: accepted pairs between the two selected sessions, plus "
+        "total loaded units and uniquely matched units in each session. Percentages "
+        "are matched units / loaded units, independent of the display filter. "
+        "Automatic accepts plus manual accepts minus rejections are counted once "
+        "per pair, not once per CV direction.\n\n"
         "Unit A diagnostics refer to that row's listed Best B. Unit B diagnostics "
         "refer to the currently selected Unit A.\n\n"
         "Pair status: accepted, a better-or-tied accepted alternative exists, or no "
@@ -1156,7 +1169,7 @@ def load_acg_cache(cache_path="acg_cache.pkl"):
 
 def run_GUI(*, preserve_decisions=True, block=True):
     """
-    This function runs the GUI, allowing the user to look at the result and manually curate the matches.
+    Open the review GUI and return its manual accept/reject lists.
 
     Set ``block=False`` in an IPython notebook to keep the kernel available
     while Tk processes events. Manual decisions are retained in memory by default.
@@ -1164,8 +1177,13 @@ def run_GUI(*, preserve_decisions=True, block=True):
 
     Returns
     -------
-    List
-        lists for the manually curated matches and non-matches
+    is_match : list
+        Manually accepted pairs, updated in place during review.
+    not_match : list
+        Manually rejected pairs, updated in place during review.
+
+    Apply these labels to your automatic matches after reviewing. With
+    ``block=False``, the returned lists remain live, not copies.
     """
     global CV_tkinter
     global root
@@ -1208,7 +1226,7 @@ def run_GUI(*, preserve_decisions=True, block=True):
     if existing_root is not None and _widget_exists(existing_root):
         existing_root.deiconify()
         existing_root.lift()
-        return is_match, not_match, matches_GUI
+        return is_match, not_match
 
     shell = None
     if not block:
@@ -1411,7 +1429,7 @@ def run_GUI(*, preserve_decisions=True, block=True):
     )
     for text, color in (
         ("accepted", APPROVED_MATCH_COLOR),
-        ("better match exists", BETTER_ALTERNATIVE_COLOR),
+        ("Alternative match accepted", BETTER_ALTERNATIVE_COLOR),
         ("no better match", NO_ACCEPTED_ALTERNATIVE_COLOR),
     ):
         ttk.Label(
@@ -1479,12 +1497,18 @@ def run_GUI(*, preserve_decisions=True, block=True):
 
     # MatchButtons
     ######################################################################################
+    match_controls = ttk.Frame(root)
     match_button = Button(
-        root, text="Set as Match", command=set_match,
+        match_controls, text="Set as Match", command=set_match,
         background="#2E7D32", foreground="white",
         activebackground="#388E3C", activeforeground="white",
         font=("DejaVu Sans", control_font_size, "bold"),
         relief="flat", padx=12, pady=5,
+    )
+    match_controls.columnconfigure(1, weight=1)
+    match_button.grid(row=0, column=0, sticky="w")
+    _create_session_summary(match_controls).grid(
+        row=0, column=1, sticky="w", padx=(12, 0),
     )
     non_match_button = Button(
         root, text="Set as Non Match", command=set_not_match,
@@ -1524,7 +1548,7 @@ def run_GUI(*, preserve_decisions=True, block=True):
 
     # Grid the units
     entry_frame.grid(row=2, column=0, columnspan=2, pady=5, padx=5, sticky="nsew")
-    match_button.grid(row=1, column=0, sticky="W", padx=10, pady=5)
+    match_controls.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
     non_match_button.grid(row=1, column=1, sticky="W", padx=10, pady=5)
     pair_lookup_button.grid(row=1, column=2, sticky="W", padx=10, pady=5)
     event_view_button.grid(row=1, column=3, sticky="W", padx=10, pady=5)
@@ -1555,7 +1579,7 @@ def run_GUI(*, preserve_decisions=True, block=True):
     else:
         shell.enable_gui("tk")
 
-    return is_match, not_match, matches_GUI
+    return is_match, not_match
 
 
 def process_info_for_GUI(
@@ -1582,7 +1606,7 @@ def process_info_for_GUI(
     raw_output_in=None,
     event_data_in=None,
     raw_avg_centroid_in=None,
-    displacement_min_references_in=20,
+    displacement_min_references_in=5,
 ):
     """
     This function:
@@ -1752,6 +1776,191 @@ def process_info_for_GUI(
     avg_centroid_avg = np.mean(avg_centroid, axis=-1)
     avg_waveform_avg = np.mean(avg_waveform, axis=-1)
     avg_waveform_per_tp_avg = np.mean(avg_waveform_per_tp, axis=-1)
+    _refresh_session_summary()
+
+
+def _session_pair_summary(accepted_pairs, switches, session_a, session_b, *, unit_mask=None):
+    """Count unique accepted links and matched units in the selected sessions."""
+    if not all(1 <= session < len(switches) for session in (session_a, session_b)):
+        raise ValueError("Session numbers must identify loaded review sessions")
+    if session_a == session_b:
+        raise ValueError("Select two different sessions for a cross-session summary")
+    start_a, stop_a = switches[session_a - 1:session_a + 1]
+    start_b, stop_b = switches[session_b - 1:session_b + 1]
+    if unit_mask is None:
+        unit_mask = np.ones(switches[-1], dtype=bool)
+    else:
+        unit_mask = np.asarray(unit_mask, dtype=bool)
+        if unit_mask.shape != (switches[-1],):
+            raise ValueError("Unit mask must contain one value per loaded review unit")
+    pairs = set()
+    for first, second in accepted_pairs:
+        if start_a <= first < stop_a and start_b <= second < stop_b:
+            if unit_mask[first] and unit_mask[second]:
+                pairs.add((int(first), int(second)))
+        elif start_a <= second < stop_a and start_b <= first < stop_b:
+            if unit_mask[first] and unit_mask[second]:
+                pairs.add((int(second), int(first)))
+    units_a = int(np.count_nonzero(unit_mask[start_a:stop_a]))
+    units_b = int(np.count_nonzero(unit_mask[start_b:stop_b]))
+    matched_a = len({first for first, _ in pairs})
+    matched_b = len({second for _, second in pairs})
+    return {
+        "accepted_pairs": len(pairs),
+        "units_a": units_a,
+        "units_b": units_b,
+        "matched_a": matched_a,
+        "matched_b": matched_b,
+        "percent_a": 100 * matched_a / units_a if units_a else None,
+        "percent_b": 100 * matched_b / units_b if units_b else None,
+    }
+
+
+def _summary_metadata_text(value):
+    if pd.isna(value):
+        return "?"
+    if isinstance(value, (float, np.floating)) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _session_group_summaries(accepted_pairs, switches, session_a, session_b, probes, shanks=None):
+    accepted_pairs = tuple(accepted_pairs)
+    metadata = {"probe": probes}
+    if shanks is not None:
+        metadata["shank"] = shanks
+    for name, values in metadata.items():
+        if np.asarray(values).shape != (switches[-1],):
+            raise ValueError(f"{name} metadata must contain one value per loaded review unit")
+    units = pd.DataFrame(metadata)
+    group_columns = "probe" if shanks is None else ["probe", "shank"]
+    summaries = []
+    for key, group in units.groupby(group_columns, sort=True, dropna=False):
+        probe, shank = (key, None) if shanks is None else key
+        mask = np.zeros(switches[-1], dtype=bool)
+        mask[group.index] = True
+        summary = _session_pair_summary(
+            accepted_pairs, switches, session_a, session_b, unit_mask=mask,
+        )
+        if not summary["units_a"] and not summary["units_b"]:
+            continue
+        label = f"Probe {_summary_metadata_text(probe)}"
+        if shanks is not None:
+            label += f" / shank {_summary_metadata_text(shank)}"
+        summaries.append((label, summary))
+    return summaries
+
+
+def _create_group_summary(master):
+    global session_group_summary
+    frame = ttk.Frame(master)
+    font = ("DejaVu Sans", _scaled_font_size(8))
+    style = ttk.Style(master)
+    style.configure("Summary.Treeview", font=font, rowheight=_scaled_font_size(8) + 8)
+    style.configure("Summary.Treeview.Heading", font=font)
+    tree = ttk.Treeview(
+        frame, columns=("group", "pairs", "a", "b"), show="headings",
+        height=2, selectmode="none", takefocus=False, style="Summary.Treeview",
+    )
+    for column, width, heading in (
+        ("group", 112, "Probe / shank"), ("pairs", 40, "Pairs"),
+        ("a", 112, "S1 matched/total"), ("b", 112, "S2 matched/total"),
+    ):
+        tree.column(column, width=width, minwidth=width, stretch=False, anchor="w")
+        tree.heading(column, text=heading)
+    scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scrollbar.set)
+    tree.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    session_group_summary = tree
+    return frame
+
+
+def _set_group_summary_rows(rows, session_a, session_b):
+    tree = session_group_summary
+    if tree is None or not _widget_exists(tree):
+        return
+    content = (session_a, session_b, rows)
+    if getattr(tree, "_summary_content", None) == content:
+        return
+    tree.heading("a", text=f"S{session_a} matched/total")
+    tree.heading("b", text=f"S{session_b} matched/total")
+    previous = set(tree.get_children())
+    for index, values in enumerate(rows):
+        row_id = f"group-{index}"
+        if row_id in previous:
+            tree.item(row_id, values=values)
+            previous.remove(row_id)
+        else:
+            tree.insert("", "end", iid=row_id, values=values)
+    for row_id in previous:
+        tree.delete(row_id)
+    tree._summary_content = content
+
+
+def _refresh_group_summary(accepted_pairs, overall, session_a, session_b):
+    if session_group_summary is None or not _widget_exists(session_group_summary):
+        return
+    probes = clus_info.get("probe_numbers")
+    if probes is None:
+        _set_group_summary_rows([("Probes unknown", "", "", "")], session_a, session_b)
+        return
+    groups = _session_group_summaries(
+        accepted_pairs, session_switch, session_a, session_b,
+        probes, clus_info.get("shank_ids"),
+    )
+    rows = []
+    for label, summary in groups:
+        values = [label, summary["accepted_pairs"]]
+        for side in ("a", "b"):
+            percent = summary[f"percent_{side}"]
+            percentage = "n/a" if percent is None else f"{percent:.1f}%"
+            values.append(
+                f"{summary[f'matched_{side}']}/{summary[f'units_{side}']} ({percentage})"
+            )
+        rows.append(tuple(values))
+    cross_group_pairs = overall["accepted_pairs"] - sum(
+        summary["accepted_pairs"] for _, summary in groups
+    )
+    if cross_group_pairs:
+        rows.append(("Across groups", cross_group_pairs, "See overall", "See overall"))
+    _set_group_summary_rows(rows, session_a, session_b)
+
+
+def _create_session_summary(master):
+    global session_summary_label
+    session_summary_label = ttk.Label(
+        master, justify="left", font=("DejaVu Sans", _scaled_font_size(9)),
+        wraplength=round(350 * gui_scale),
+    )
+    _create_group_summary(master).grid(row=0, column=2, sticky="w", padx=(12, 0))
+    _refresh_session_summary()
+    return session_summary_label
+
+
+def _refresh_session_summary(accepted_pairs=None):
+    if session_summary_label is None or not _widget_exists(session_summary_label):
+        return
+    session_a, session_b = int(session_entry_a.get()), int(session_entry_b.get())
+    if session_a == session_b:
+        session_summary_label.configure(text="Summary: select two different sessions")
+        _set_group_summary_rows([], session_a, session_b)
+        return
+    if accepted_pairs is None:
+        accepted_pairs = _curated_accepted_pairs(automatic_match_pairs, is_match, not_match)
+    summary = _session_pair_summary(accepted_pairs, session_switch, session_a, session_b)
+    lines = [f"Accepted pairs (S{session_a} / S{session_b}): {summary['accepted_pairs']}"]
+    for side, session in (("a", session_a), ("b", session_b)):
+        percent = summary[f"percent_{side}"]
+        percentage = "n/a" if percent is None else f"{percent:.1f}%"
+        lines.append(
+            f"S{session}: {summary[f'units_{side}']} units; "
+            f"{summary[f'matched_{side}']} matched ({percentage})"
+        )
+    text = "\n".join(lines)
+    if session_summary_label.cget("text") != text:
+        session_summary_label.configure(text=text)
+    _refresh_group_summary(accepted_pairs, summary, session_a, session_b)
 
 
 def _unusual_filter_enabled():
@@ -1821,7 +2030,7 @@ def _pair_review_category(
     score_matrix,
     session_ids,
 ):
-    """Classify a pair using the existing one-match-per-endpoint rule."""
+    """Prefer accepted partners for A; compare scores for other A competitors."""
     pair_key = frozenset((int(unit_a), int(unit_b)))
     accepted = {
         frozenset(map(int, pair))
@@ -1852,6 +2061,10 @@ def _pair_review_category(
             source, target = second, first
         else:
             continue
+        if source == unit_a and target != unit_b:
+            return "better_alternative"
+        if target != unit_b or source == unit_a:
+            continue
         alternative_score = score_matrix[source, target]
         if np.isfinite(alternative_score) and (
             not np.isfinite(current_score)
@@ -1881,6 +2094,7 @@ def color_unit_a_options(event=None):
     accepted_pairs = _curated_accepted_pairs(
         automatic_match_pairs, is_match, not_match
     )
+    _refresh_session_summary(accepted_pairs)
     for unit_a, unit_b in option_a:
         category = _pair_review_category(
             unit_a, unit_b, accepted_pairs, output_avg, clus_info["session_id"]
@@ -2260,6 +2474,7 @@ def _render_selected_pair():
     """
     global pending_redraw
     pending_redraw = None
+    _refresh_session_summary()
     if not entry_a.get() or not entry_b.get():
         return
     unit_a = int(entry_a.get())
@@ -2432,6 +2647,7 @@ def update_unusual_displacement_filter():
     """Fit/filter in the worker; never block Tk on robust covariance fitting."""
     global consistency_filter_cancel, consistency_filter_future, consistency_filter_after
     global displacement_metric_executor, consistency_filter_threshold
+    _refresh_session_summary()
     _cancel_consistency_filter()
     try:
         threshold = float(consistency_threshold_var.get())
@@ -3507,24 +3723,52 @@ def set_not_match(event=None):
     _refresh_displacement_consistency()
 
 
+def _fit_review_tables(event=None):
+    if unit_tables_frame is None or not _widget_exists(unit_tables_frame):
+        return
+    minimum_width = max(
+        unit_tables_frame._minimum_column_width,
+        sum(frame.winfo_reqwidth() for frame in unit_tables_frame.winfo_children()) + 28,
+    )
+    if session_summary_label is not None and _widget_exists(session_summary_label):
+        minimum_width = max(minimum_width, session_summary_label.master.winfo_reqwidth() + 20)
+    if root.grid_columnconfigure(0)["minsize"] != minimum_width:
+        root.columnconfigure(0, minsize=minimum_width)
+
+
+def _make_review_table(table, title, column):
+    """Keep both read-only tables together with content-sized columns."""
+    global unit_tables_frame
+    if unit_tables_frame is None or not _widget_exists(unit_tables_frame):
+        unit_tables_frame = ttk.Frame(root)
+        unit_tables_frame.grid(
+            row=4, column=0, rowspan=2, padx=10, pady=5, sticky="new",
+        )
+        unit_tables_frame._minimum_column_width = root.grid_columnconfigure(0)["minsize"]
+    frame = ttk.LabelFrame(unit_tables_frame, text=title)
+    font = tkfont.Font(root=root, family="DejaVu Sans", size=_scaled_font_size(10))
+    values = [[" ".join(str(value).split()) for value in row] for row in table]
+    widths = [
+        int(np.ceil(max(font.measure(value) for value in cells) / font.measure("0"))) + 2
+        for cells in zip(*values)
+    ]
+    for row_index, row in enumerate(values):
+        for column_index, value in enumerate(row):
+            entry = ttk.Entry(frame, width=widths[column_index], font=font)
+            entry.insert(END, value)
+            entry.configure(state="readonly")
+            entry.grid(row=row_index, column=column_index, sticky="ew")
+    frame._value_font = font
+    frame.grid(row=0, column=column, padx=(0, 8) if column == 0 else 0, sticky="nw")
+    frame.bind("<Configure>", _fit_review_tables)
+    return frame
+
+
 def MakeTable(table):
     global frame_table
-
     if frame_table.winfo_exists() == 1:
         frame_table.destroy()
-
-    total_rows = len(table)
-    total_columns = len(table[0])
-
-    colors = ["black", UNIT_A_COLOR, UNIT_B_COLOR]
-    frame_table = ttk.LabelFrame(root, text="UnitData")
-    for i in range(total_rows):
-        for j in range(total_columns):
-            e = ttk.Entry(frame_table, width=20)
-            e.insert(END, table[i][j])
-            e.configure(state="readonly")
-            e.grid(row=i, column=j)
-    frame_table.grid(row=4, column=0, padx=10, pady=10, sticky="nw")
+    frame_table = _make_review_table(table, "UnitData", 0)
 
 
 # get table data #ADD STABILTY - prob of unit with itself accros cv
@@ -3657,23 +3901,9 @@ def get_unit_score_table(UnitA, UnitB, CVoption):
 
 def make_unit_score_table(table):
     global score_table
-
     if score_table.winfo_exists() == 1:
         score_table.destroy()
-
-    total_rows = len(table)
-    total_columns = len(table[0])
-
-    colors = ["black", "Purple"]
-    score_table = ttk.LabelFrame(root, text="UM Scores")
-    for i in range(total_rows):
-        for j in range(total_columns):
-            e = ttk.Entry(score_table, width=30)
-            e.insert(END, table[i][j])
-            e.configure(state="readonly")
-            e.grid(row=i, column=j)
-
-    score_table.grid(row=5, column=0, padx=10, pady=10, sticky="nw")
+    score_table = _make_review_table(table, "UM Scores", 1)
 
 
 def plot_avg_waveforms(UnitA, UnitB, CV):

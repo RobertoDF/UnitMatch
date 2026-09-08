@@ -51,7 +51,7 @@ class DisplacementConsistency:
     empirical scatter already includes measurement noise. Zero MAD does not
     establish zero uncertainty; no artificial epsilon is substituted.
 
-    The default minimum of 20 references is configurable (at least 3), not calibrated.
+    The default minimum of 5 references is configurable (at least 3), not calibrated.
     Fits are cached in a bounded, instance-local LRU; replace the snapshot
     whenever decisions or scientific inputs change. No input is modified.
     """
@@ -67,7 +67,7 @@ class DisplacementConsistency:
         accepted_pairs,
         *,
         shank_ids=None,
-        min_references=20,
+        min_references=5,
     ):
         if (
             isinstance(min_references, (bool, np.bool_))

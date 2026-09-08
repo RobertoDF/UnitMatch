@@ -531,14 +531,16 @@ def test_order_good_sites_handles_sixteen_channels():
     )
 
 
-def test_pair_review_category_uses_bidirectional_better_alternatives_and_ties():
-    session_ids = np.array([0, 0, 1, 0, 1, 0, 1])
-    scores = np.zeros((7, 7))
+def test_pair_review_category_uses_accepted_alternatives_and_competitor_scores():
+    session_ids = np.array([0, 0, 1, 0, 1, 0, 1, 2])
+    scores = np.zeros((8, 8))
     scores[0, 2] = 0.8
     scores[1, 2] = 0.9
     scores[3, 4] = 0.7
     scores[5, 6] = 0.7
     scores[0, 4] = 0.7
+    scores[2, 0] = 0.9
+    scores[2, 1] = 0.1
 
     assert gui._pair_review_category(
         0,
@@ -547,6 +549,39 @@ def test_pair_review_category_uses_bidirectional_better_alternatives_and_ties():
         scores,
         session_ids,
     ) == "accepted"
+    # Another accepted B for this displayed A is an alternative regardless of score.
+    assert gui._pair_review_category(
+        2,
+        0,
+        [(1, 2)],
+        scores,
+        session_ids,
+    ) == "better_alternative"
+    # Merely browsing another B does not create an accepted alternative.
+    assert gui._pair_review_category(
+        2,
+        0,
+        [],
+        scores,
+        session_ids,
+    ) == "no_alternative"
+    # A rejected/removed alternative is no longer considered.
+    assert gui._pair_review_category(
+        2,
+        0,
+        [(2, 0)],
+        scores,
+        session_ids,
+    ) == "accepted"
+    # An accepted pair involving A in another session pair is unrelated.
+    assert gui._pair_review_category(
+        3,
+        4,
+        [(3, 7)],
+        scores,
+        session_ids,
+    ) == "no_alternative"
+    # A different A claiming displayed B retains the existing score rule.
     assert gui._pair_review_category(
         0,
         2,
@@ -557,17 +592,117 @@ def test_pair_review_category_uses_bidirectional_better_alternatives_and_ties():
     assert gui._pair_review_category(
         3,
         4,
-        [(5, 6)],
+        [(4, 0)],
         scores,
         session_ids,
-    ) == "no_alternative"
+    ) == "better_alternative"
+    scores[0, 4] = 0.6
     assert gui._pair_review_category(
         3,
         4,
         [(4, 0)],
         scores,
         session_ids,
+    ) == "no_alternative"
+
+
+@pytest.mark.parametrize(
+    "unit_a,unit_b,alternative_b,session_ids",
+    [
+        (0, 2, 3, [0, 0, 1, 1, 2]),
+        (3, 0, 1, [0, 0, 1, 1, 2]),
+        (3, 0, 1, [1, 1, 0, 0, 2]),
+    ],
+)
+@pytest.mark.parametrize("alternative_score", [0.2, np.nan])
+def test_pair_review_category_same_a_acceptance_overrides_score(
+    unit_a, unit_b, alternative_b, session_ids, alternative_score
+):
+    scores = np.zeros((5, 5))
+    scores[unit_a, unit_b] = 0.9
+    scores[unit_a, alternative_b] = alternative_score
+    alternate = (alternative_b, unit_a)
+
+    assert gui._pair_review_category(
+        unit_a, unit_b, [alternate], scores, session_ids
     ) == "better_alternative"
+    assert gui._pair_review_category(
+        unit_a, unit_b, [alternate, (unit_b, unit_a)], scores, session_ids
+    ) == "accepted"
+    assert gui._pair_review_category(
+        unit_a, unit_b, [], scores, session_ids
+    ) == "no_alternative"
+    assert gui._pair_review_category(
+        unit_a, unit_b, [(unit_a, 4)], scores, session_ids
+    ) == "no_alternative"
+    effective = gui._curated_accepted_pairs(
+        [alternate], [(unit_a, alternative_b)], [alternate]
+    )
+    assert effective == []
+    assert gui._pair_review_category(
+        unit_a, unit_b, effective, scores, session_ids
+    ) == "no_alternative"
+
+
+@pytest.mark.parametrize(
+    "competitor_score,expected",
+    [
+        (0.7, "no_alternative"),
+        (0.8, "better_alternative"),
+        (0.9, "better_alternative"),
+        (np.nan, "no_alternative"),
+        (np.inf, "no_alternative"),
+    ],
+)
+def test_pair_review_category_other_a_retains_finite_score_rule(
+    competitor_score, expected
+):
+    scores = np.zeros((3, 3))
+    scores[0, 2] = 0.8
+    scores[1, 2] = competitor_score
+
+    assert gui._pair_review_category(
+        0, 2, [(2, 1)], scores, [0, 0, 1]
+    ) == expected
+
+
+def test_color_unit_a_options_refreshes_alternative_without_reranking(monkeypatch):
+    calls = []
+
+    class Entry:
+        @staticmethod
+        def set_review_status(unit, category):
+            calls.append((unit, category))
+
+    options = [[3, 0], [2, 1]]
+    scores = np.zeros((4, 4))
+    scores[3, 0], scores[3, 1], scores[2, 1] = 0.9, 0.2, 0.8
+    original_scores = scores.copy()
+    monkeypatch.setattr(gui, "entry_a", Entry(), raising=False)
+    monkeypatch.setattr(gui, "option_a", options, raising=False)
+    monkeypatch.setattr(gui, "automatic_match_pairs", set(), raising=False)
+    monkeypatch.setattr(gui, "is_match", [], raising=False)
+    monkeypatch.setattr(gui, "not_match", [], raising=False)
+    monkeypatch.setattr(gui, "output_avg", scores, raising=False)
+    monkeypatch.setattr(
+        gui, "clus_info", {"session_id": np.array([0, 0, 1, 1])}, raising=False
+    )
+    monkeypatch.setattr(gui, "_refresh_session_summary", lambda pairs: None)
+
+    gui.color_unit_a_options()
+    assert calls == [(3, "no_alternative"), (2, "no_alternative")]
+    gui.is_match[:] = [[1, 3], [3, 1]]
+    calls.clear()
+    gui.color_unit_a_options()
+    assert calls == [(3, "better_alternative"), (2, "no_alternative")]
+    gui.not_match[:] = [[3, 1]]
+    calls.clear()
+    gui.color_unit_a_options()
+    assert calls == [(3, "no_alternative"), (2, "no_alternative")]
+    assert gui.option_a is options
+    assert options == [[3, 0], [2, 1]]
+    assert gui.output_avg is scores
+    np.testing.assert_array_equal(scores, original_scores)
 
 
 def test_color_unit_a_options_shows_all_three_states(monkeypatch):
@@ -635,7 +770,7 @@ def test_unit_a_table_selection_colors_and_filter_refresh():
         for unit, category in ((0, "accepted"), (1, "better_alternative"), (3, "no_alternative")):
             table.set_review_status(unit, category)
             assert table.table.item(str(unit), "tags") == (category,)
-        assert table.table.set("1", "status") == "Better match exists"
+        assert table.table.set("1", "status") == "Alternative match accepted"
         assert str(table.table.tag_configure("accepted", "foreground")) == gui.APPROVED_MATCH_COLOR
         assert gui.ttk.Style(root).map("UnitA.Treeview", "foreground") == []
         table.set_options([])
@@ -684,8 +819,12 @@ def test_reopening_review_focuses_existing_window_without_reset(monkeypatch):
     monkeypatch.setattr(gui, "root", existing, raising=False)
     monkeypatch.setattr(gui, "is_match", [[0, 1]])
     monkeypatch.setattr(gui, "not_match", [[2, 3]])
-    monkeypatch.setattr(gui, "matches_GUI", ["existing"], raising=False)
-    assert gui.run_GUI() == ([[0, 1]], [[2, 3]], ["existing"])
+    accepted, rejected = gui.run_GUI()
+    assert accepted is gui.is_match
+    assert rejected is gui.not_match
+    assert (accepted, rejected) == ([[0, 1]], [[2, 3]])
+    gui.is_match.append([4, 5])
+    assert accepted[-1] == [4, 5]
     existing.deiconify.assert_called_once()
     existing.lift.assert_called_once()
 

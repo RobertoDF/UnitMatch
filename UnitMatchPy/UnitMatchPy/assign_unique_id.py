@@ -1,7 +1,9 @@
 import os
 import warnings
+from uuid import uuid4
 
 import numpy as np
+import pandas as pd
 
 
 def check_is_in(test_array, parent_array):
@@ -39,7 +41,7 @@ def _filter_pairs_by_isi(pairs, clus_info, param):
     if not param.get("remove_over_merges", True):
         return isi_exclude
 
-    session_ids = clus_info["session_id"]
+    session_ids = np.asarray(clus_info["session_id"])
     same_session = session_ids[pairs[:, 0]] == session_ids[pairs[:, 1]]
     if not np.any(same_session):
         return isi_exclude
@@ -217,224 +219,389 @@ def get_within_session_merge_groups(
     return merge_groups
 
 
-def assign_unique_id(output_prob_array, param, clus_info):
+def _validate_identity_inputs(n_units, clus_info, session_names):
+    original_ids = np.asarray(clus_info["original_ids"]).reshape(-1)
+    session_ids = np.asarray(clus_info["session_id"]).reshape(-1)
+    session_switch = np.asarray(clus_info["session_switch"])
+    if len(original_ids) != n_units or len(session_ids) != n_units:
+        raise ValueError(
+            "clus_info original_ids and session_id must align with "
+            "output_prob_array."
+        )
+    if (
+        session_switch.ndim != 1
+        or len(session_switch) == 0
+        or not np.issubdtype(session_switch.dtype, np.integer)
+        or session_switch[0] != 0
+        or session_switch[-1] != n_units
+        or np.any(np.diff(session_switch) < 0)
+    ):
+        raise ValueError(
+            "clus_info['session_switch'] must be ordered boundaries from 0 "
+            "through the number of units."
+        )
+    if len(original_ids) and not np.issubdtype(original_ids.dtype, np.integer):
+        raise ValueError("clus_info['original_ids'] must contain integers.")
+    try:
+        original_ids = pd.array(original_ids, dtype="Int64")
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "clus_info['original_ids'] must fit pandas nullable Int64."
+        ) from exc
+
+    n_sessions = len(session_switch) - 1
+    if session_names is None:
+        session_names = [f"Session{index + 1}" for index in range(n_sessions)]
+    else:
+        session_names = list(session_names)
+        if len(session_names) != n_sessions:
+            raise ValueError(
+                "session_names must contain one name per session_switch interval."
+            )
+        if any(not isinstance(name, str) or not name for name in session_names):
+            raise ValueError("session_names must contain non-empty strings.")
+    if len(set(session_names)) != len(session_names) or "UUID" in session_names:
+        raise ValueError("session_names must be unique and cannot include 'UUID'.")
+
+    session_indices = np.searchsorted(
+        session_switch[1:], np.arange(n_units), side="right"
+    )
+    session_labels = []
+    for session_index in range(n_sessions):
+        start, stop = session_switch[session_index : session_index + 2]
+        labels = np.unique(session_ids[start:stop])
+        if len(labels) > 1:
+            raise ValueError(
+                "clus_info session_id disagrees with session_switch in "
+                f"session interval {session_index + 1}."
+            )
+        if len(labels) == 1:
+            session_labels.append(labels[0])
+    if len(np.unique(session_labels)) != len(session_labels):
+        raise ValueError(
+            "clus_info session_id must identify each non-empty "
+            "session_switch interval uniquely."
+        )
+
+    unit_keys = pd.DataFrame(
+        {"session": session_indices, "original_id": original_ids}
+    )
+    duplicates = unit_keys.duplicated(["session", "original_id"], keep=False)
+    if duplicates.any():
+        duplicate = unit_keys.loc[duplicates].iloc[0]
+        raise ValueError(
+            "clus_info contains duplicate original_ids within session "
+            f"{int(duplicate['session']) + 1}: "
+            f"{int(duplicate['original_id'])}."
+        )
+
+    return (
+        original_ids,
+        session_ids,
+        session_switch.astype(np.int64, copy=False),
+        session_indices,
+        session_names,
+    )
+
+
+def _pair_array(pairs, name, n_units=None):
+    if pairs is None:
+        return np.empty((0, 2), dtype=np.int64)
+    if isinstance(pairs, np.ndarray):
+        values = pairs
+    else:
+        try:
+            values = np.asarray(list(pairs))
+        except TypeError as exc:
+            raise ValueError(f"{name} must be an iterable of unit-index pairs.") from exc
+    if values.size == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    if values.ndim != 2 or values.shape[1] != 2:
+        raise ValueError(f"{name} must have shape (n_pairs, 2).")
+    if not np.issubdtype(values.dtype, np.integer):
+        raise ValueError(f"{name} must contain integer unit indices.")
+
+    values = values.astype(np.int64, copy=False)
+    if np.any(values < 0):
+        raise ValueError(f"{name} contains a negative unit index.")
+    if n_units is not None and np.any(values >= n_units):
+        raise ValueError(
+            f"{name} contains a unit index outside [0, {n_units})."
+        )
+    if np.any(values[:, 0] == values[:, 1]):
+        raise ValueError(f"{name} cannot contain self-pairs.")
+    return np.unique(np.sort(values, axis=1), axis=0)
+
+
+def _valid_pair_constraint(valid_pairs):
+    if valid_pairs is None:
+        return None, None
+    if isinstance(valid_pairs, np.ndarray) and valid_pairs.ndim == 2:
+        if (
+            valid_pairs.shape[0] != valid_pairs.shape[1]
+            or not np.issubdtype(valid_pairs.dtype, np.bool_)
+        ):
+            raise ValueError("valid_pairs mask must be a square boolean matrix.")
+        return valid_pairs, valid_pairs.shape[0]
+    return {
+        tuple(pair)
+        for pair in _pair_array(valid_pairs, "valid_pairs").tolist()
+    }, None
+
+
+def curate_match_pairs(
+    automatic_matches,
+    is_match,
+    not_match,
+    *,
+    valid_pairs=None,
+):
+    """Combine automatic and manual decisions into canonical accepted pairs.
+
+    Every input is treated as an undirected pair collection. Explicit
+    rejections override automatic and manual acceptances.
     """
-    Assign units to a common group depending on different criteria:
-    Conservative - adds units which match with EVERY unit in the proposed group
-    Intermediate - adds units which match with EVERY unit in same/adjacent sessions in the proposed group
-    Liberal - adds all units which match with any unit in the proposed group
-    Each unit will be given a unique group id for each case.
+    constraint, n_units = _valid_pair_constraint(valid_pairs)
+    normalized = {
+        name: _pair_array(pairs, name, n_units=n_units)
+        for name, pairs in (
+            ("automatic_matches", automatic_matches),
+            ("is_match", is_match),
+            ("not_match", not_match),
+        )
+    }
+
+    for name, pairs in normalized.items():
+        for unit_a, unit_b in pairs:
+            pair = (int(unit_a), int(unit_b))
+            if isinstance(constraint, np.ndarray):
+                valid = bool(
+                    constraint[unit_a, unit_b]
+                    or constraint[unit_b, unit_a]
+                )
+            elif constraint is not None:
+                valid = pair in constraint
+            else:
+                valid = True
+            if not valid:
+                raise ValueError(
+                    f"{name} contains pair {pair} excluded by valid_pairs."
+                )
+
+    accepted = {
+        tuple(pair)
+        for pair in np.vstack(
+            (normalized["automatic_matches"], normalized["is_match"])
+        ).tolist()
+    }
+    accepted.difference_update(
+        tuple(pair) for pair in normalized["not_match"].tolist()
+    )
+    if not accepted:
+        return np.empty((0, 2), dtype=np.int64)
+    return np.asarray(sorted(accepted), dtype=np.int64)
+
+
+def _intermediate_group_ids_from_pairs(ordered_pairs, n_units, session_ids):
+    unique_id = np.arange(n_units, dtype=np.int64)
+    if len(ordered_pairs) == 0:
+        return unique_id
+
+    accepted_pairs = {tuple(pair) for pair in ordered_pairs.tolist()}
+    session_ids = np.asarray(session_ids)
+
+    for unit_a, unit_b in ordered_pairs:
+        group_a = np.flatnonzero(unique_id == unique_id[unit_a])
+        group_b = np.flatnonzero(unique_id == unique_id[unit_b])
+        checks = []
+        for member in group_b:
+            if member != unit_a:
+                checks.append((min(unit_a, member), max(unit_a, member)))
+        for member in group_a:
+            if member != unit_b:
+                checks.append((min(unit_b, member), max(unit_b, member)))
+
+        nearby_checks = [
+            pair
+            for pair in checks
+            if abs(session_ids[pair[0]] - session_ids[pair[1]]) <= 1
+        ]
+        if not nearby_checks or all(pair in accepted_pairs for pair in nearby_checks):
+            group = np.union1d(group_a, group_b)
+            unique_id[group] = np.min(unique_id[group])
+
+    return unique_id
+
+
+def _probability_pairs(output_prob_array, threshold, clus_info, param):
+    pairs = np.argwhere(output_prob_array > threshold)
+    pairs = pairs[pairs[:, 0] != pairs[:, 1]]
+    pairs = np.sort(pairs, axis=1)
+    if len(pairs) == 0:
+        return np.empty((0, 2), dtype=np.int64)
+
+    pairs_unique, count = np.unique(pairs, axis=0, return_counts=True)
+    pairs_unique = pairs_unique[count > 1]
+    if len(pairs_unique) == 0:
+        return pairs_unique
+
+    isi_exclude = _filter_pairs_by_isi(pairs_unique, clus_info, param)
+    pairs_unique = pairs_unique[~isi_exclude]
+    if len(pairs_unique) == 0:
+        return pairs_unique
+
+    prob_mean = np.nanmean(
+        np.column_stack(
+            (
+                output_prob_array[pairs_unique[:, 0], pairs_unique[:, 1]],
+                output_prob_array[pairs_unique[:, 1], pairs_unique[:, 0]],
+            )
+        ),
+        axis=1,
+    )
+    return pairs_unique[np.argsort(-prob_mean, kind="stable")]
+
+
+def _identity_table(
+    group_ids,
+    original_ids,
+    session_indices,
+    session_names,
+):
+    columns = ["UUID", *session_names]
+    records = []
+    for group_id in dict.fromkeys(group_ids.tolist()):
+        unit_indices = np.flatnonzero(group_ids == group_id)
+        group_sessions = session_indices[unit_indices]
+        if len(np.unique(group_sessions)) != len(group_sessions):
+            conflicting_session = int(
+                group_sessions[
+                    np.flatnonzero(
+                        np.bincount(group_sessions)[group_sessions] > 1
+                    )[0]
+                ]
+            )
+            conflicting_ids = [
+                int(original_ids[index])
+                for index in unit_indices[group_sessions == conflicting_session]
+            ]
+            raise ValueError(
+                "Intermediate identity contains multiple units from "
+                f"{session_names[conflicting_session]}: {conflicting_ids}."
+            )
+
+        record = {"UUID": str(uuid4())}
+        for unit_index, session_index in zip(unit_indices, group_sessions):
+            record[session_names[session_index]] = int(original_ids[unit_index])
+        records.append(record)
+
+    identities = pd.DataFrame.from_records(records, columns=columns)
+    for session_name in session_names:
+        identities[session_name] = pd.array(
+            identities[session_name], dtype="Int64"
+        )
+    return identities
+
+
+def assign_unique_id(
+    match_pairs,
+    clus_info,
+    *,
+    session_names=None,
+):
+    """Assign canonical accepted pairs to intermediate UnitMatch identities.
+
+    A group merge must be supported by all supplied same/adjacent-session
+    comparisons. Every input unit is represented, including unmatched
+    singleton units.
 
     Parameters
     ----------
-    output : ndarray (n_units, n_uunits)
-        The 2d probability matrix which gives the UnitMatch probability of a unit with every other unit
-    param : dict
-        The param dictionary
+    match_pairs : iterable of pairs
+        Accepted undirected pairs using UnitMatch matrix row indices.
     clus_info : dict
-        The clus_info dictionary
+        Cluster metadata containing ``original_ids``, ``session_id``, and
+        ``session_switch``.
+    session_names : sequence of str, optional
+        Output column names in ``session_switch`` order. Defaults to
+        ``Session1``, ``Session2``, and so on.
 
     Returns
     -------
-    List
-        A list of arrays which gives each unit its group ID for each case
+    pandas.DataFrame
+        Columns are ``UUID`` followed by one nullable ``Int64`` column per
+        session. UUID4 values are newly generated on every call; they are not a
+        persistent identity registry.
     """
-    all_cluster_ids = clus_info["original_ids"]  # each units has unique ID
+    n_units = len(np.asarray(clus_info["original_ids"]).reshape(-1))
+    (
+        original_ids,
+        _session_ids,
+        _session_switch,
+        session_indices,
+        session_names,
+    ) = _validate_identity_inputs(n_units, clus_info, session_names)
+    pairs = _pair_array(match_pairs, "match_pairs", n_units=n_units)
+    group_ids = _intermediate_group_ids_from_pairs(
+        pairs, n_units, session_indices
+    )
+    return _identity_table(
+        group_ids, original_ids, session_indices, session_names
+    )
 
-    # create arrays for the unique ids
-    unique_id_liberal = np.arange(all_cluster_ids.shape[0])
-    ori_unique_id = np.arange(all_cluster_ids.shape[0])
-    unique_id_conservative = np.arange(all_cluster_ids.shape[0])
-    unique_id = np.arange(all_cluster_ids.shape[0])  # Intermediate Case
 
-    # use a data driven probability threshold
+def assign_unique_id_from_probabilities(
+    output_prob_array,
+    param,
+    clus_info,
+    *,
+    session_names=None,
+):
+    """Assign identities from bidirectionally thresholded probabilities.
+
+    This preserves the historical probability-based intermediate grouping
+    workflow. New post-review code should call :func:`assign_unique_id` with
+    curated accepted pairs instead.
+    """
+    output_prob_array = np.asarray(output_prob_array)
+    if (
+        output_prob_array.ndim != 2
+        or output_prob_array.shape[0] != output_prob_array.shape[1]
+    ):
+        raise ValueError("output_prob_array must be a square matrix.")
+    n_units = output_prob_array.shape[0]
+    (
+        original_ids,
+        _session_ids,
+        _session_switch,
+        session_indices,
+        session_names,
+    ) = _validate_identity_inputs(n_units, clus_info, session_names)
+
     if param.get("use_data_driven_prob_thrs", False):
         stepsz = 0.1
         bin_edges = np.arange(0, 1 + stepsz, stepsz)
         plot_vec = np.arange(stepsz / 2, 1, stepsz)
-
-        hw, __ = np.histogram(
+        histogram, _ = np.histogram(
             np.diag(output_prob_array), bins=len(bin_edges), density=True
         )
-
-        threshold = plot_vec[np.diff(hw) > 0.1]
+        candidates = plot_vec[np.diff(histogram) > 0.1]
+        if len(candidates) != 1:
+            raise ValueError(
+                "Data-driven probability threshold did not resolve to one value."
+            )
+        threshold = candidates[0]
     else:
         threshold = param["match_threshold"]
 
-    pairs = np.argwhere(output_prob_array > threshold)
-    pairs = np.delete(
-        pairs, np.argwhere(pairs[:, 0] == pairs[:, 1]), axis=0
-    )  # delete self-matches
-    pairs = np.sort(pairs, axis=1)  # arange so smaller pairID is in column 1
-    # Only keep one copy of pairs only if both CV agree its a match
-    pairs_unique, count = np.unique(pairs, axis=0, return_counts=True)
-    pairs_unique_filt = np.delete(
-        pairs_unique, count == 1, axis=0
-    )  # if Count = 1 only 1 CV for that pair!
-
-    # Remove same-session pairs whose merge would cause ISI refractory violations
-    isi_exclude = _filter_pairs_by_isi(pairs_unique_filt, clus_info, param)
-    pairs_unique_filt = pairs_unique_filt[~isi_exclude]
-
-    # get the mean probability for each match
-    prob_mean = np.nanmean(
-        np.vstack(
-            (
-                output_prob_array[pairs_unique_filt[:, 0], pairs_unique_filt[:, 1]],
-                output_prob_array[pairs_unique_filt[:, 1], pairs_unique_filt[:, 0]],
-            )
-        ),
-        axis=0,
+    grouping_clus_info = dict(clus_info)
+    grouping_clus_info["session_id"] = session_indices
+    ordered_pairs = _probability_pairs(
+        output_prob_array, threshold, grouping_clus_info, param
     )
-    # sort by the mean probability
-    pairs_prob = np.hstack((pairs_unique_filt, prob_mean[:, np.newaxis]))
-    sorted_idxs = np.argsort(-pairs_prob[:, 2], axis=0)  # start go in descending order
-    pairs_prob_sorted = np.zeros_like(pairs_prob)
-    pairs_prob_sorted = pairs_prob[sorted_idxs, :]
-
-    # Create a list which has both copies of each match e.g (1,2) and (2,1) for easier comparison
-    pairs_all = np.zeros((pairs_unique_filt.shape[0] * 2, 2))
-    pairs_all[: pairs_unique_filt.shape[0], :] = pairs_unique_filt
-    pairs_all[pairs_unique_filt.shape[0] :, :] = pairs_unique_filt[:, (1, 0)]
-
-    n_matches_conservative = 0
-    n_matches_liberal = 0
-    n_matches = 0
-    # Go through each pair and assign to groups!!
-    for pair in pairs_prob_sorted[:, :2]:
-        pair = pair.astype(np.int16)
-
-        # Get the conservative group ID for the current 2 units
-        unit_a_conservative_id = unique_id_conservative[pair[0]]
-        unit_b_conservative_id = unique_id_conservative[pair[1]]
-        # get all units which have the same ID
-        same_group_id_a = np.argwhere(
-            unique_id_conservative == unit_a_conservative_id
-        ).squeeze()
-        same_group_id_b = np.argwhere(
-            unique_id_conservative == unit_b_conservative_id
-        ).squeeze()
-        # reshape array to be a 1d array if needed
-        if len(same_group_id_a.shape) == 0:
-            same_group_id_a = same_group_id_a[np.newaxis]
-        if len(same_group_id_b.shape) == 0:
-            same_group_id_b = same_group_id_b[np.newaxis]
-
-        # will need to check if pair[0] has match with SameGroupIdB and vice versa
-        check_pairs_a = np.stack(
-            (
-                same_group_id_b,
-                np.broadcast_to(np.array(pair[0]), same_group_id_b.shape),
-            ),
-            axis=-1,
-        )
-        check_pairs_b = np.stack(
-            (
-                same_group_id_a,
-                np.broadcast_to(np.array(pair[1]), same_group_id_a.shape),
-            ),
-            axis=-1,
-        )
-        # delete the potential self-matches
-        check_pairs_a = np.delete(
-            check_pairs_a,
-            np.argwhere(check_pairs_a[:, 0] == check_pairs_a[:, 1]),
-            axis=0,
-        )
-        check_pairs_b = np.delete(
-            check_pairs_b,
-            np.argwhere(check_pairs_b[:, 0] == check_pairs_b[:, 1]),
-            axis=0,
-        )
-
-        if np.logical_and(
-            np.all(check_is_in(check_pairs_a, pairs_all)),
-            np.all(check_is_in(check_pairs_b, pairs_all)),
-        ):
-            # If each pairs matches with every unit in the other pairs group
-            # can add as match to all classes
-            all_pairs = np.vstack((check_pairs_a, check_pairs_b))
-            all_group_idxs = np.unique(all_pairs)
-            unique_id_conservative[all_group_idxs] = np.min(
-                unique_id_conservative[all_group_idxs]
-            )
-            n_matches_conservative += 1
-
-        ##Intermediate matches
-        # Now test to see if each pairs match with every unit in the other pair IF they are in the same/adjacent sessions
-        unit_a_id = unique_id[pair[0]]
-        unit_b_id = unique_id[pair[1]]
-
-        same_group_id_a = np.argwhere(unique_id == unit_a_id).squeeze()
-        same_group_id_b = np.argwhere(unique_id == unit_b_id).squeeze()
-        if len(same_group_id_a.shape) == 0:
-            same_group_id_a = same_group_id_a[np.newaxis]
-        if len(same_group_id_b.shape) == 0:
-            same_group_id_b = same_group_id_b[np.newaxis]
-
-        check_pairs_a = np.stack(
-            (
-                same_group_id_b,
-                np.broadcast_to(np.array(pair[0]), same_group_id_b.shape),
-            ),
-            axis=-1,
-        )
-        check_pairs_b = np.stack(
-            (
-                same_group_id_a,
-                np.broadcast_to(np.array(pair[1]), same_group_id_a.shape),
-            ),
-            axis=-1,
-        )
-        # delete potential self-matches
-        check_pairs_a = np.delete(
-            check_pairs_a,
-            np.argwhere(check_pairs_a[:, 0] == check_pairs_a[:, 1]),
-            axis=0,
-        )
-        check_pairs_b = np.delete(
-            check_pairs_b,
-            np.argwhere(check_pairs_b[:, 0] == check_pairs_b[:, 1]),
-            axis=0,
-        )
-
-        # check to see if they are in the same or adjacent sessions
-        near_session_a = np.abs(np.diff(clus_info["session_id"][check_pairs_a])) <= 1
-        near_session_b = np.abs(np.diff(clus_info["session_id"][check_pairs_b])) <= 1
-
-        check_pairs_near_a = check_pairs_a[near_session_a.squeeze()]
-        check_pairs_near_b = check_pairs_b[near_session_b.squeeze()]
-
-        # Catch the case where the units ARE NOT in adjacent session, so CheckPairsNear is empty
-        if np.logical_and(check_pairs_near_a.size == 0, check_pairs_near_b.size == 0):
-            all_pairs = np.vstack((check_pairs_a, check_pairs_b))
-            all_group_idxs = np.unique(all_pairs)
-            unique_id[all_group_idxs] = np.min(unique_id[all_group_idxs])
-            n_matches += 1
-        elif np.logical_and(
-            np.all(check_is_in(check_pairs_near_a, pairs_all)),
-            np.all(check_is_in(check_pairs_near_b, pairs_all)),
-        ):
-            all_pairs = np.vstack((check_pairs_a, check_pairs_b))
-            all_group_idxs = np.unique(all_pairs)
-            unique_id[all_group_idxs] = np.min(unique_id[all_group_idxs])
-            n_matches += 1
-
-        ## Liberal Matches
-        same_group_id_a = np.argwhere(
-            unique_id_liberal == unique_id_liberal[pair[0]]
-        ).squeeze()
-        same_group_id_b = np.argwhere(
-            unique_id_liberal == unique_id_liberal[pair[1]]
-        ).squeeze()
-
-        all_pairs = np.hstack((same_group_id_a, same_group_id_b))
-        all_group_idxs = np.unique(all_pairs)
-        unique_id_liberal[all_group_idxs] = np.min(unique_id_liberal[all_group_idxs])
-        n_matches_liberal += 1
-
-    print(f"Number of Liberal Matches: {n_matches_liberal}")
-    print(f"Number of Intermediate Matches: {n_matches}")
-    print(f"Number of Conservative Matches: {n_matches_conservative}")
-
-    return [unique_id_liberal, unique_id, unique_id_conservative, ori_unique_id]
+    group_ids = _intermediate_group_ids_from_pairs(
+        ordered_pairs, n_units, session_indices
+    )
+    return _identity_table(
+        group_ids, original_ids, session_indices, session_names
+    )

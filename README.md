@@ -93,7 +93,7 @@ does not treat a short displacement as an automatic failure. This assumes a
 dominant coherent displacement population, not a validated model for multiple
 distinct displacement clusters.
 
-The initial minimum is **20 usable reference pairs after exclusions**,
+The initial minimum is **5 usable reference pairs after exclusions**,
 configurable with `displacement_min_references_in` in
 `gui.process_info_for_GUI(...)`. This is an initial review setting, not a
 validated universal threshold. Insufficient data or unreliable uncertainty

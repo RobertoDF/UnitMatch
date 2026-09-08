@@ -49,6 +49,7 @@ full = [
   "spikeinterface>=0.100,<0.120", 
 ]
 notebooks = ["ipykernel>=6,<7", "ipywidgets>=8,<9"]
+archive = ["pyarrow>=14,<26"]
 dev = ["pytest", "ruff", "mypy", "build", "twine"]
 parity = ["pytest", "spikeinterface>=0.100,<0.120"]
 

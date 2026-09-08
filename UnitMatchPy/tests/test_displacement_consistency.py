@@ -129,9 +129,9 @@ def test_conflicting_reference_assignments_are_all_removed():
     assert result.score is not None
 
 
-@pytest.mark.parametrize("count,available", [(19, False), (20, True), (21, True)])
+@pytest.mark.parametrize("count,available", [(4, False), (5, True), (6, True)])
 def test_minimum_boundary_after_excluding_accepted_candidate(count, available):
-    data = list(_data(_cloud(count)))
+    data = list(_data(_cloud(count), noise=0.5))
     data[3] = np.vstack([data[3], data[4]])
     result = _model(data).score(*data[4])
     assert result.reference_count == count
@@ -142,6 +142,9 @@ def test_minimum_boundary_after_excluding_accepted_candidate(count, available):
 def test_configurable_minimum():
     data = _data(_cloud(19))
     assert _model(data, min_references=19).score(*data[4]).score is not None
+    result = _model(data, min_references=20).score(*data[4])
+    assert result.score is None
+    assert "19 < 20" in result.reason
 
 
 @pytest.mark.parametrize("isolation", ["probe", "session", "shank"])

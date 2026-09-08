@@ -1,11 +1,103 @@
-import os
 import json
+import os
 import pickle
 import shutil
-import pandas as pd
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
 from tqdm.auto import tqdm
+
+
+def _new_identity_lookup(identities):
+    if "UUID" not in identities.columns:
+        raise ValueError("Identity DataFrame must contain a 'UUID' column.")
+    if identities["UUID"].isna().any() or identities["UUID"].duplicated().any():
+        raise ValueError("Identity DataFrame UUID values must be present and unique.")
+    session_columns = [column for column in identities.columns if column != "UUID"]
+    lookup_parts = []
+    for session_number, column in enumerate(session_columns, start=1):
+        part = identities.loc[identities[column].notna(), ["UUID", column]].copy()
+        part["RecSes"] = session_number
+        part = part.rename(columns={column: "OriginalID"})
+        try:
+            part["OriginalID"] = pd.array(part["OriginalID"], dtype="Int64")
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Identity column {column!r} must contain nullable integers."
+            ) from exc
+        lookup_parts.append(part)
+
+    if lookup_parts:
+        lookup = pd.concat(lookup_parts, ignore_index=True)
+    else:
+        lookup = pd.DataFrame(columns=["UUID", "OriginalID", "RecSes"])
+        lookup["OriginalID"] = pd.array([], dtype="Int64")
+    duplicates = lookup.duplicated(["RecSes", "OriginalID"], keep=False)
+    if duplicates.any():
+        duplicate = lookup.loc[duplicates].iloc[0]
+        raise ValueError(
+            "UnitIdentities contains multiple UUID mappings for session "
+            f"{int(duplicate['RecSes'])}, original ID "
+            f"{int(duplicate['OriginalID'])}."
+        )
+    return lookup
+
+
+def _add_identity_columns(match_table, identities):
+    lookup = _new_identity_lookup(identities)
+    for endpoint in (1, 2):
+        endpoint_lookup = lookup.rename(
+            columns={
+                "UUID": f"UUID{endpoint}",
+                "OriginalID": f"ID{endpoint}",
+                "RecSes": f"RecSes {endpoint}",
+            }
+        )
+        match_table = match_table.merge(
+            endpoint_lookup,
+            on=[f"RecSes {endpoint}", f"ID{endpoint}"],
+            how="left",
+            validate="many_to_one",
+            sort=False,
+        )
+        if match_table[f"UUID{endpoint}"].isna().any():
+            missing = match_table.loc[
+                match_table[f"UUID{endpoint}"].isna(),
+                [f"RecSes {endpoint}", f"ID{endpoint}"],
+            ].iloc[0]
+            raise ValueError(
+                "UnitIdentities is missing a mapping for session "
+                f"{int(missing[f'RecSes {endpoint}'])}, original ID "
+                f"{int(missing[f'ID{endpoint}'])}."
+            )
+    return match_table
+
+
+def _match_table_session_numbers(clus_info, n_units):
+    if "session_switch" not in clus_info:
+        return np.asarray(clus_info["session_id"]).reshape(-1) + 1
+
+    session_switch = np.asarray(clus_info["session_switch"])
+    if (
+        session_switch.ndim != 1
+        or len(session_switch) == 0
+        or not np.issubdtype(session_switch.dtype, np.integer)
+        or session_switch[0] != 0
+        or session_switch[-1] != n_units
+        or np.any(np.diff(session_switch) < 0)
+    ):
+        raise ValueError(
+            "clus_info['session_switch'] must be ordered boundaries from 0 "
+            "through the number of units."
+        )
+    return (
+        np.searchsorted(
+            session_switch[1:], np.arange(n_units), side="right"
+        )
+        + 1
+    )
+
 
 def save_auc_summary(save_dir, auc_summary):
     """
@@ -50,8 +142,9 @@ def make_match_table(
         The clus_info dictionary
     param : dict
         The param dictionary
-    UIDs : list, optional
-        The list of unique ids for different case from assign_unique_id, by default None
+    UIDs : pandas.DataFrame or list, optional
+        The identity table from assign_unique_id. Legacy four-array UID input
+        remains supported for loading/saving older workflows.
     matches_curated : list, optional
         A list of matches manually curated using the GUI, by default None
 
@@ -68,17 +161,15 @@ def make_match_table(
     # UnitA = np.reshape(xx, (nUnits * nUnits)).astype(np.int16)
     # UnitB = np.reshape(yy, (nUnits * nUnits)).astype(np.int16)
 
-    original_ids = clus_info["original_ids"].squeeze()
+    original_ids = np.asarray(clus_info["original_ids"]).reshape(-1)
     xx, yy = np.meshgrid(original_ids, original_ids)
     unit_a_list = xx.reshape(n_units * n_units)
     unit_b_list = yy.reshape(n_units * n_units)
 
-    session_id = clus_info["session_id"]
-    xx, yy = np.meshgrid(session_id, session_id)
-    unit_a_session_list = (
-        xx.reshape(n_units * n_units) + 1
-    )  # Add one here so it counts from one not 0
-    unit_b_session_list = yy.reshape(n_units * n_units) + 1
+    session_numbers = _match_table_session_numbers(clus_info, n_units)
+    xx, yy = np.meshgrid(session_numbers, session_numbers)
+    unit_a_session_list = xx.reshape(n_units * n_units)
+    unit_b_session_list = yy.reshape(n_units * n_units)
 
     all_matches = np.reshape(output_threshold, (n_units * n_units)).astype(
         np.int8
@@ -97,54 +188,27 @@ def make_match_table(
             np.int8
         )
 
-        df = pd.DataFrame(
-            np.array(
-                [
-                    unit_a_list,
-                    unit_b_list,
-                    unit_a_session_list,
-                    unit_b_session_list,
-                    all_matches,
-                    matches_curated_list,
-                    prob_list,
-                    total_score_list,
-                ]
-            ).T,
-            columns=[
-                "ID1",
-                "ID2",
-                "RecSes 1",
-                "RecSes 2",
-                "Matches",
-                "Matches Currated",
-                "UM Probabilities",
-                "TotalScore",
-            ],
-        )
+        df = pd.DataFrame({
+            "ID1": unit_a_list,
+            "ID2": unit_b_list,
+            "RecSes 1": unit_a_session_list,
+            "RecSes 2": unit_b_session_list,
+            "Matches": all_matches,
+            "Matches Currated": matches_curated_list,
+            "UM Probabilities": prob_list,
+            "TotalScore": total_score_list,
+        })
 
     else:
-        df = pd.DataFrame(
-            np.array(
-                [
-                    unit_a_list,
-                    unit_b_list,
-                    unit_a_session_list,
-                    unit_b_session_list,
-                    all_matches,
-                    prob_list,
-                    total_score_list,
-                ]
-            ).T,
-            columns=[
-                "ID1",
-                "ID2",
-                "RecSes 1",
-                "RecSes 2",
-                "Matches",
-                "UM Probabilities",
-                "TotalScore",
-            ],
-        )
+        df = pd.DataFrame({
+            "ID1": unit_a_list,
+            "ID2": unit_b_list,
+            "RecSes 1": unit_a_session_list,
+            "RecSes 2": unit_b_session_list,
+            "Matches": all_matches,
+            "UM Probabilities": prob_list,
+            "TotalScore": total_score_list,
+        })
 
     # add a dictionary to the match table
     for key, value in scores_to_include.items():
@@ -157,6 +221,9 @@ def make_match_table(
 
     # if you have supplied UIDs create a data frame using them and merge it to the save table
     if UIDs is not None:
+        if isinstance(UIDs, pd.DataFrame):
+            return _add_identity_columns(df, UIDs)
+
         unique_id_liberal = UIDs[0]
         unique_id = UIDs[1]
         unique_id_conservative = UIDs[2]
@@ -209,21 +276,23 @@ def make_match_table(
 
 def save_to_output(
     save_dir,
-    scores_to_include,
-    matches,
-    output_prob,
-    avg_centroid,
-    avg_waveform,
-    avg_waveform_per_tp,
-    max_site,
-    total_score,
-    output_threshold,
-    clus_info,
-    param,
+    scores_to_include=None,
+    matches=None,
+    output_prob=None,
+    avg_centroid=None,
+    avg_waveform=None,
+    avg_waveform_per_tp=None,
+    max_site=None,
+    total_score=None,
+    output_threshold=None,
+    clus_info=None,
+    param=None,
     UIDs=None,
     matches_curated=None,
     save_match_table=True,
     functional_scores=None,
+    *,
+    review_snapshot=None,
 ):
     """
     Saves all useful information calculated by UnitMatch to a given save_dir
@@ -255,13 +324,68 @@ def save_to_output(
     param : dict
         The param dictionary
         _description_
-    UIDs : list, optional
-        The list of unique ids for different case from assign_unique_id, by default None
+    UIDs : pandas.DataFrame or list, optional
+        Identity table from assign_unique_id, or legacy four-array UID input.
     matches_curated : list, optional
         A list of matches manually curated using the GUI, by default None
     save_match_table : bool, optional
         If True will save a match table containing the information for every pair of units in a table, by default True
+    review_snapshot : AcceptedReviewSnapshot, optional
+        Write the compact accepted-review archive instead of the legacy dense
+        output. In this mode, do not provide any legacy scientific arguments.
+
+    Returns
+    -------
+    pathlib.Path or None
+        The compact archive path in review-snapshot mode. Legacy mode preserves
+        its historical ``None`` return value.
     """
+
+    if review_snapshot is not None:
+        legacy_values = (
+            scores_to_include,
+            matches,
+            output_prob,
+            avg_centroid,
+            avg_waveform,
+            avg_waveform_per_tp,
+            max_site,
+            total_score,
+            output_threshold,
+            clus_info,
+            param,
+            UIDs,
+            matches_curated,
+            functional_scores,
+        )
+        if any(value is not None for value in legacy_values):
+            raise TypeError(
+                "Compact review_snapshot mode cannot be combined with legacy "
+                "scientific output arguments."
+            )
+        from UnitMatchPy.review_archive import save_review_output
+
+        return save_review_output(save_dir, review_snapshot)
+
+    required = {
+        "scores_to_include": scores_to_include,
+        "matches": matches,
+        "output_prob": output_prob,
+        "avg_centroid": avg_centroid,
+        "avg_waveform": avg_waveform,
+        "avg_waveform_per_tp": avg_waveform_per_tp,
+        "max_site": max_site,
+        "total_score": total_score,
+        "output_threshold": output_threshold,
+        "clus_info": clus_info,
+        "param": param,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise TypeError(
+            "Legacy save_to_output mode is missing required arguments: "
+            + ", ".join(missing)
+        )
 
     # Choose a file where the save directory will be made
     # options for create and overwrite?
@@ -301,9 +425,12 @@ def save_to_output(
     matches_path = os.path.join(save_dir, "Matches")
     np.save(matches_path, matches)
 
-    if matches_curated != None:
+    if matches_curated is not None:
         matches_curated_path = os.path.join(save_dir, "Matches Currated")
         np.save(matches_curated_path, matches_curated)
+
+    if isinstance(UIDs, pd.DataFrame):
+        UIDs.to_csv(os.path.join(save_dir, "UnitIdentities.csv"), index=False)
 
     if save_match_table == True:
         df = make_match_table(
@@ -370,8 +497,8 @@ def save_to_output_seperate_CV(
     param : dict
         The param dictionary
         _description_
-    UIDs : list, optional
-        The list of unique ids for different case from assign_unique_id, by default None
+    UIDs : pandas.DataFrame or list, optional
+        Identity table from assign_unique_id, or legacy four-array UID input.
     matches_curated : list, optional
         A list of matches manually curated using the GUI, by default None
     save_match_table : bool, optional
@@ -455,9 +582,12 @@ def save_to_output_seperate_CV(
     matches_path_cv21 = os.path.join(save_dir, "Matches CV21")
     np.save(matches_path_cv21, matches21)
 
-    if matches_curated != None:
+    if matches_curated is not None:
         MatchesCuratedPath = os.path.join(save_dir, "Matches Currated")
         np.save(MatchesCuratedPath, matches_curated)
+
+    if isinstance(UIDs, pd.DataFrame):
+        UIDs.to_csv(os.path.join(save_dir, "UnitIdentities.csv"), index=False)
 
     output_threshold = np.zeros_like(output_prob)
     output_threshold[output_prob > match_threshold] = 1
