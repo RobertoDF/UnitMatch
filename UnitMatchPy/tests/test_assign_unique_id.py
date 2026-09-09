@@ -2,8 +2,58 @@ import numpy as np
 import pytest
 from UnitMatchPy.assign_unique_id import (
     _filter_pairs_by_isi,
+    curate_match_pairs,
     get_within_session_merge_groups,
 )
+
+
+def _cross_session_same_probe_mask():
+    """Four units: two sessions x two probes, ordered (s0p0, s0p1, s1p0, s1p1)."""
+    sessions = np.array([0, 0, 1, 1])
+    probes = np.array([0, 1, 0, 1])
+    return (sessions[:, None] != sessions[None, :]) & (probes[:, None] == probes[None, :])
+
+
+def test_rejecting_an_ineligible_pair_is_a_no_op():
+    mask = _cross_session_same_probe_mask()
+
+    curated = curate_match_pairs(
+        [[0, 2]], [], [[1, 2]], valid_pairs=mask,
+    )
+
+    np.testing.assert_array_equal(curated, [[0, 2]])
+
+
+def test_rejections_still_override_accepted_pairs():
+    mask = _cross_session_same_probe_mask()
+
+    curated = curate_match_pairs(
+        [[0, 2]], [[1, 3]], [[2, 0]], valid_pairs=mask,
+    )
+
+    np.testing.assert_array_equal(curated, [[1, 3]])
+
+
+@pytest.mark.parametrize("field", ["automatic_matches", "is_match"])
+def test_accepting_an_ineligible_pair_is_still_refused(field):
+    mask = _cross_session_same_probe_mask()
+    decisions = {"automatic_matches": [], "is_match": [], "not_match": []}
+    decisions[field] = [[1, 2]]
+
+    with pytest.raises(ValueError, match=f"{field} contains pair"):
+        curate_match_pairs(
+            decisions["automatic_matches"],
+            decisions["is_match"],
+            decisions["not_match"],
+            valid_pairs=mask,
+        )
+
+
+def test_ineligible_rejections_are_still_validated_as_pairs():
+    mask = _cross_session_same_probe_mask()
+
+    with pytest.raises(ValueError, match="not_match cannot contain self-pairs"):
+        curate_match_pairs([], [], [[1, 1]], valid_pairs=mask)
 
 
 def _params():

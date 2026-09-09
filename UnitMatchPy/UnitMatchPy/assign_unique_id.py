@@ -360,6 +360,12 @@ def curate_match_pairs(
 
     Every input is treated as an undirected pair collection. Explicit
     rejections override automatic and manual acceptances.
+
+    ``valid_pairs`` constrains only the accepting collections. A rejection
+    can only ever remove a pair, so rejecting one that was never eligible is
+    a no-op rather than an error: reviewers reach such pairs in the GUI,
+    whose Unit B list spans a whole session regardless of probe, and
+    aborting a finished review over a harmless click would discard it all.
     """
     constraint, n_units = _valid_pair_constraint(valid_pairs)
     normalized = {
@@ -371,8 +377,8 @@ def curate_match_pairs(
         )
     }
 
-    for name, pairs in normalized.items():
-        for unit_a, unit_b in pairs:
+    for name in ("automatic_matches", "is_match"):
+        for unit_a, unit_b in normalized[name]:
             pair = (int(unit_a), int(unit_b))
             if isinstance(constraint, np.ndarray):
                 valid = bool(
