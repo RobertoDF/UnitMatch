@@ -1571,6 +1571,8 @@ def run_GUI(*, preserve_decisions=True, block=True):
     root.columnconfigure(0, minsize=selection_min_width * 3 // 5)
     root.columnconfigure(1, minsize=selection_min_width - selection_min_width * 3 // 5)
 
+    _review_table_column_widths.clear()
+    root.bind("<Configure>", _schedule_review_fit, add="+")
     update(None)
     match_idx = 0
 
@@ -2143,7 +2145,7 @@ def create_unit_legend():
 
     unit_legend_plot = FigureCanvasTkAgg(fig, master=root)
     unit_legend_plot.draw()
-    unit_legend_plot = unit_legend_plot.get_tk_widget()
+    unit_legend_plot = _dark_tk_canvas(unit_legend_plot.get_tk_widget())
 
 
 def create_hist_legend():
@@ -2174,7 +2176,7 @@ def create_hist_legend():
 
     hist_legend_plot = FigureCanvasTkAgg(fig, master=root)
     hist_legend_plot.draw()
-    hist_legend_plot = hist_legend_plot.get_tk_widget()
+    hist_legend_plot = _dark_tk_canvas(hist_legend_plot.get_tk_widget())
 
 
 def compute_acg(spike_times, bin_size=0.001, max_lag=0.05):
@@ -2376,8 +2378,8 @@ def plot_acgs(unit_a, unit_b):
 
     # Create canvas below the position/trajectory plot.
     acg_canvas = FigureCanvasTkAgg(fig, master=root)
-    acg_canvas.draw()
-    acg_plot = acg_canvas.get_tk_widget()
+    acg_canvas.draw_idle()
+    acg_plot = _dark_tk_canvas(acg_canvas.get_tk_widget())
     acg_plot.grid(
         row=4,
         column=1,
@@ -2469,13 +2471,28 @@ def update(event):
 
 
 def _render_selected_pair():
+    """Render a pair, ignoring the resize events the render itself causes."""
+    global _rendering_pair, _render_settle_job
+    _rendering_pair = True
+    try:
+        return _render_selected_pair_inner()
+    finally:
+        if _render_settle_job is not None:
+            try:
+                root.after_cancel(_render_settle_job)
+            except Exception:
+                pass
+        _render_settle_job = root.after(250, _end_render_settle)
+
+
+def _render_selected_pair_inner():
     """
     Updates the GUI.
     """
     global pending_redraw
     pending_redraw = None
-    _refresh_session_summary()
     if not entry_a.get() or not entry_b.get():
+        _refresh_session_summary()
         return
     unit_a = int(entry_a.get())
     unit_b = int(entry_b.get())
@@ -3283,7 +3300,7 @@ def open_event_view():
     figure.patch.set_facecolor("#33393b")
     axes = figure.subplots(2, 1, sharex=True)
     canvas = FigureCanvasTkAgg(figure, master=event_view_window)
-    canvas.get_tk_widget().pack(fill=BOTH, expand=True)
+    _dark_tk_canvas(canvas.get_tk_widget()).pack(fill=BOTH, expand=True)
 
     def refresh():
         if not _widget_exists(event_view_window):
@@ -3723,56 +3740,390 @@ def set_not_match(event=None):
     _refresh_displacement_consistency()
 
 
-def _fit_review_tables(event=None):
-    if unit_tables_frame is None or not _widget_exists(unit_tables_frame):
+REVIEW_TABLE_MAX_CHARS = 26
+REVIEW_COLUMN_MAX_SHARE = 0.5
+# Columns 0 and 1 hold the selection controls and review tables; 2 and 3 hold
+# the plots.  Tk applies minsize before weight, so without a ceiling the
+# controls can leave the plots a few pixels wide on a narrow screen.
+CONTROL_COLUMNS_MAX_SHARE = 0.62
+CONTROL_COLUMN_FLOORS = (260, 200)
+_review_table_column_widths = {}
+
+
+def _width_sample_units(limit=120):
+    """An evenly spread sample of units, used to size table columns once."""
+    try:
+        total = int(avg_centroid_avg.shape[1])
+    except Exception:
+        return []
+    if total <= 0:
+        return []
+    step = max(1, total // limit)
+    units = list(range(0, total, step))[:limit]
+    if total - 1 not in units:
+        units.append(total - 1)
+    return units
+
+
+def _stable_table_widths(title, values, font):
+    """Size table columns once per session rather than per selected pair.
+
+    Widths used to follow whichever pair was on screen, so every selection
+    resized the tables, which resized root column 0, which squeezed the plot
+    columns. Sampling the session up front and clamping the result keeps the
+    geometry fixed and keeps one outlier row (the full list of matched units,
+    which reaches 65 characters) from swallowing the plot area.
+    """
+    unit = font.measure("0") or 1
+    try:
+        cv_option = CV_tkinter.get() - 1
+    except Exception:
+        cv_option = None
+    key = (title, cv_option, len(values[0]) if values else 0, unit)
+    cached = _review_table_column_widths.get(key)
+    if cached is not None:
+        return cached
+
+    rows = [list(row) for row in values]
+    for sample_unit in _width_sample_units():
+        try:
+            if title == "UM Scores":
+                data = get_unit_score_table(sample_unit, sample_unit, cv_option)
+            else:
+                data = get_table_data(
+                    sample_unit, sample_unit, get_cv_option(), for_sizing=True
+                )
+        except Exception:
+            continue
+        rows.extend(
+            [" ".join(str(value).split()) for value in row] for row in data
+        )
+
+    widths = []
+    for cells in zip(*rows):
+        measured = max(int(np.ceil(font.measure(value) / unit)) for value in cells)
+        widths.append(min(measured, REVIEW_TABLE_MAX_CHARS) + 2)
+    _review_table_column_widths[key] = widths
+    return widths
+
+
+def _capped_review_width(minimum_width):
+    """Stop the review column from starving the plot columns.
+
+    Its minsize is derived from widgets living inside it, so on a wide window
+    it can grow until the plots have nothing left.
+    """
+    try:
+        window_width = int(root.winfo_width())
+    except Exception:
+        return minimum_width
+    if window_width <= 1:
+        return minimum_width
+    return max(240, min(minimum_width, int(window_width * REVIEW_COLUMN_MAX_SHARE)))
+
+
+_review_fit_job = None
+_review_fit_size = None
+_rendering_pair = False
+_render_settle_job = None
+_review_base_width = None
+_natural_control_width = None
+
+
+def _end_render_settle():
+    """Resume honouring resize events once the post-render reflow has settled."""
+    global _rendering_pair, _render_settle_job, _review_fit_size
+    _render_settle_job = None
+    _rendering_pair = False
+    if root is not None and _widget_exists(root):
+        # Adopt the settled size so it does not read as a fresh resize.
+        _review_fit_size = (root.winfo_width(), root.winfo_height())
+
+
+def _schedule_review_fit(event=None):
+    """Re-apply the review-column cap after a resize, not just after a render."""
+    global _review_fit_job, _review_fit_size
+    if _rendering_pair:
         return
-    minimum_width = max(
+    if event is not None:
+        if event.widget is not root:
+            return
+        size = (event.width, event.height)
+        if size == _review_fit_size:
+            return
+        _review_fit_size = size
+    if _review_fit_job is not None:
+        try:
+            root.after_cancel(_review_fit_job)
+        except Exception:
+            pass
+    _review_fit_job = root.after(120, _run_review_fit)
+
+
+def _run_review_fit():
+    global _review_fit_job
+    _review_fit_job = None
+    try:
+        _fit_review_tables()
+    except Exception:
+        pass
+
+
+def _review_uncapped_width():
+    """Base width of the review column, cached because it is deterministic.
+
+    Querying winfo_reqwidth() forces Tk to recompute requested sizes for the
+    whole widget tree, so doing it on every <Configure> event re-lays-out every
+    panel.  Table column widths are clamped and cached (stage 1), so this value
+    only changes when the table frame is rebuilt.
+    """
+    global _review_base_width
+    if _review_base_width is not None:
+        return _review_base_width
+    width = max(
         unit_tables_frame._minimum_column_width,
         sum(frame.winfo_reqwidth() for frame in unit_tables_frame.winfo_children()) + 28,
     )
     if session_summary_label is not None and _widget_exists(session_summary_label):
-        minimum_width = max(minimum_width, session_summary_label.master.winfo_reqwidth() + 20)
-    if root.grid_columnconfigure(0)["minsize"] != minimum_width:
-        root.columnconfigure(0, minsize=minimum_width)
+        width = max(width, session_summary_label.master.winfo_reqwidth() + 20)
+    _review_base_width = width
+    return width
+
+
+def _control_column_widths():
+    """Widths for columns 0 and 1 that leave the plot columns room to breathe."""
+    global _natural_control_width
+    if _natural_control_width is None:
+        _natural_control_width = (
+            int(root.grid_columnconfigure(0)["minsize"]),
+            int(root.grid_columnconfigure(1)["minsize"]),
+        )
+    review_width = _capped_review_width(_review_uncapped_width())
+    selection_width = _natural_control_width[1]
+    window_width = root.winfo_width()
+    if window_width > 1:
+        budget = int(window_width * CONTROL_COLUMNS_MAX_SHARE)
+        total = review_width + selection_width
+        if total > budget and total > 0:
+            scale = budget / total
+            review_width = max(CONTROL_COLUMN_FLOORS[0], int(review_width * scale))
+            selection_width = max(CONTROL_COLUMN_FLOORS[1], int(selection_width * scale))
+    return review_width, selection_width
+
+
+def _fit_review_tables(event=None):
+    if unit_tables_frame is None or not _widget_exists(unit_tables_frame):
+        return
+    review_width, selection_width = _control_column_widths()
+    if root.grid_columnconfigure(0)["minsize"] != review_width:
+        root.columnconfigure(0, minsize=review_width)
+    if root.grid_columnconfigure(1)["minsize"] != selection_width:
+        root.columnconfigure(1, minsize=selection_width)
+
+
+_review_table_cells = {}
+_review_table_fonts = {}
+
+
+def _dark_tk_canvas(widget):
+    """Match the widget background to the figure so redraws do not flash white."""
+    try:
+        widget.configure(bg="#33393b")
+    except Exception:
+        pass
+    return widget
+
+
+def _review_table_font():
+    """One Tk font per size. Fresh fonts per pair leak and get slower over time."""
+    size = _scaled_font_size(10)
+    font = _review_table_fonts.get(size)
+    if font is not None:
+        try:
+            font.measure("0")
+            return font
+        except Exception:
+            pass
+    font = tkfont.Font(root=root, family="DejaVu Sans", size=size)
+    _review_table_fonts[size] = font
+    return font
 
 
 def _make_review_table(table, title, column):
     """Keep both read-only tables together with content-sized columns."""
-    global unit_tables_frame
+    global unit_tables_frame, _review_base_width
     if unit_tables_frame is None or not _widget_exists(unit_tables_frame):
+        _review_base_width = None
+        _review_table_cells.clear()
         unit_tables_frame = ttk.Frame(root)
         unit_tables_frame.grid(
             row=4, column=0, rowspan=2, padx=10, pady=5, sticky="new",
         )
         unit_tables_frame._minimum_column_width = root.grid_columnconfigure(0)["minsize"]
-    frame = ttk.LabelFrame(unit_tables_frame, text=title)
-    font = tkfont.Font(root=root, family="DejaVu Sans", size=_scaled_font_size(10))
+    font = _review_table_font()
     values = [[" ".join(str(value).split()) for value in row] for row in table]
-    widths = [
-        int(np.ceil(max(font.measure(value) for value in cells) / font.measure("0"))) + 2
-        for cells in zip(*values)
-    ]
+    widths = list(_stable_table_widths(title, values, font))
+
+    cached = _review_table_cells.get(title)
+    if cached is not None:
+        frame, cells, cached_widths = cached
+        same_shape = (
+            _widget_exists(frame)
+            and cached_widths == widths
+            and len(cells) == len(values)
+            and all(len(a) == len(b) for a, b in zip(cells, values))
+        )
+        if same_shape:
+            # Rewriting text is far cheaper than rebuilding the widget grid.
+            for row_entries, row in zip(cells, values):
+                for entry, value in zip(row_entries, row):
+                    if getattr(entry, "_current_value", None) == value:
+                        continue
+                    entry.configure(state="normal")
+                    entry.delete(0, END)
+                    entry.insert(END, value)
+                    entry.configure(state="readonly")
+                    entry._current_value = value
+            return frame  # stage18_reuse
+        if _widget_exists(frame):
+            frame.destroy()
+        _review_table_cells.pop(title, None)
+
+    frame = ttk.LabelFrame(unit_tables_frame, text=title)
+    cells = []
     for row_index, row in enumerate(values):
+        row_entries = []
         for column_index, value in enumerate(row):
             entry = ttk.Entry(frame, width=widths[column_index], font=font)
             entry.insert(END, value)
             entry.configure(state="readonly")
             entry.grid(row=row_index, column=column_index, sticky="ew")
+            entry._current_value = value
+            row_entries.append(entry)
+        cells.append(row_entries)
     frame._value_font = font
     frame.grid(row=0, column=column, padx=(0, 8) if column == 0 else 0, sticky="nw")
     frame.bind("<Configure>", _fit_review_tables)
+    _review_table_cells[title] = (frame, cells, widths)
     return frame
 
 
 def MakeTable(table):
     global frame_table
-    if frame_table.winfo_exists() == 1:
-        frame_table.destroy()
-    frame_table = _make_review_table(table, "UnitData", 0)
+    frame_table = _make_review_table(table, "UnitData", 0)  # stage18
 
 
 # get table data #ADD STABILTY - prob of unit with itself accros cv
-def get_table_data(UnitA, UnitB, CV):
+event_modulation_cache = {}
+
+
+def _trial_psth(spike_times, event_times, before_s, after_s, bin_size_s):
+    """Per-trial rates. The trial-averaged PSTH alone cannot show reliability."""
+    edges = np.arange(-before_s, after_s + bin_size_s, bin_size_s)
+    n_bins = edges.size - 1
+    n_trials = int(event_times.size)
+    starts = np.searchsorted(spike_times, event_times - before_s)
+    stops = np.searchsorted(spike_times, event_times + after_s)
+    per_trial = stops - starts
+    total = int(per_trial.sum())
+
+    counts = np.zeros((n_trials, n_bins), dtype=float)
+    if total:
+        # Flatten the ragged per-trial spike slices into a single index array.
+        ends = np.cumsum(per_trial)
+        offsets = np.repeat(starts - ends + per_trial, per_trial)
+        flat_spikes = spike_times[offsets + np.arange(total)]
+        trial_id = np.repeat(np.arange(n_trials), per_trial)
+        # Bin against the real edges rather than by dividing: floor(1.0 / 0.01)
+        # is 99, not 100, so arithmetic binning misplaces boundary spikes.
+        relative = flat_spikes - event_times[trial_id]
+        bin_id = np.searchsorted(edges, relative, side="right") - 1
+        # Matches np.histogram: the closing edge belongs to the last bin.
+        np.clip(bin_id, 0, n_bins - 1, out=bin_id)
+        counts = (
+            np.bincount(trial_id * n_bins + bin_id, minlength=n_trials * n_bins)
+            .astype(float)
+            .reshape(n_trials, n_bins)
+        )
+    return edges[:-1] + bin_size_s / 2, counts / bin_size_s
+
+
+def _event_modulation(unit_index, settings=None):
+    """Response strength and reliability for the unit's most modulated event.
+
+    z is the peak departure from the pre-event baseline in baseline SD units.
+    On its own it is not evidence of encoding: it is a maximum over ~200 bins,
+    so on this dataset it never falls below about 3 even for pure noise.
+
+    r is the split-half (even vs odd trial) correlation across the post-event
+    window. That is the number that separates a genuinely event-locked
+    response from noise that merely happened to peak.
+    """
+    if event_data is None:
+        return None
+    settings = settings or event_view_settings
+    key = (int(unit_index), settings)
+    if key in event_modulation_cache:
+        return event_modulation_cache[key]
+
+    before_s, after_s, bin_size_s = settings
+    result = None
+    try:
+        session = int(clus_info["session_indices"][unit_index])
+        events = event_data["event_times_by_session"][session]
+        if unit_index not in event_spike_times_cache:
+            event_spike_times_cache[unit_index] = np.asarray(
+                event_data["get_spike_times"](unit_index), dtype=float
+            )
+        spikes = np.sort(event_spike_times_cache[unit_index])
+        kernel = np.ones(3) / 3
+        for name, times in events.items():
+            times = np.asarray(times, dtype=float)
+            times = times[np.isfinite(times)]
+            if times.size < 8:
+                continue
+            centers, trials = _trial_psth(
+                spikes, times, before_s, after_s, bin_size_s
+            )
+            pre, post = centers < 0, centers >= 0
+            if pre.sum() < 3 or post.sum() < 3:
+                continue
+            mean_rate = np.convolve(trials.mean(axis=0), kernel, mode="same")
+            baseline = mean_rate[pre].mean()
+            spread = mean_rate[pre].std(ddof=1)
+            if not np.isfinite(spread) or spread <= 0:
+                spread = np.sqrt(max(baseline, 1e-9) / (times.size * bin_size_s))
+            z = float(np.abs(mean_rate[post] - baseline).max() / spread)
+            even = np.convolve(trials[0::2].mean(axis=0), kernel, mode="same")[post]
+            odd = np.convolve(trials[1::2].mean(axis=0), kernel, mode="same")[post]
+            if even.std() > 0 and odd.std() > 0:
+                reliability = float(np.corrcoef(even, odd)[0, 1])
+            else:
+                reliability = None
+            if result is None or z > result["z"]:
+                result = {"z": z, "r": reliability, "event": name}
+    except (IndexError, KeyError, OSError, TypeError, ValueError):
+        result = None
+
+    event_modulation_cache[key] = result
+    return result
+
+
+def _event_modulation_cells(unit_index, for_sizing=False):
+    if for_sizing:
+        # Widest plausible text, so column sizing never triggers a PSTH pass.
+        return "00.0 (Stimulus onset)", "0.00"
+    modulation = _event_modulation(unit_index)
+    if modulation is None:
+        return "n/a", "n/a"
+    reliability = modulation["r"]
+    return (
+        f"{modulation['z']:.1f} ({modulation['event']})",
+        "n/a" if reliability is None else f"{reliability:.2f}",
+    )
+
+
+def get_table_data(UnitA, UnitB, CV, for_sizing=False):
     template = [
         ["Unit", "A", "B"],
         ["Avg Centroid", "tmp", "tmp"],
@@ -3857,6 +4208,13 @@ def get_table_data(UnitA, UnitB, CV):
                         np.round(output_GUI[0][unit_idx_tmp[j], unit_idx_tmp[j]], 3)
                     )
 
+    event_rows = [["Event peak z"], ["Event reliab r"]]
+    for unit_index in unit_idx_tmp[1:]:
+        peak, reliability = _event_modulation_cells(unit_index, for_sizing)
+        event_rows[0].append(peak)
+        event_rows[1].append(reliability)
+    table.extend(event_rows)
+
     return table
 
 
@@ -3896,14 +4254,24 @@ def get_unit_score_table(UnitA, UnitB, CVoption):
                         )
                     )
 
+    # centroid_dist saturates to 0 beyond param["max_dist"], so a far pair is
+    # indistinguishable from a merely distant one. Show the actual separation.
+    try:
+        separation = float(
+            np.linalg.norm(avg_centroid_avg[:, UnitA] - avg_centroid_avg[:, UnitB])
+        )
+    except (IndexError, TypeError, ValueError):
+        separation = None
+    table.append(
+        ["centroid dist um", "n/a" if separation is None else f"{separation:.0f}"]
+    )
+
     return table
 
 
 def make_unit_score_table(table):
     global score_table
-    if score_table.winfo_exists() == 1:
-        score_table.destroy()
-    score_table = _make_review_table(table, "UM Scores", 1)
+    score_table = _make_review_table(table, "UM Scores", 1)  # stage18
 
 
 def plot_avg_waveforms(UnitA, UnitB, CV):
@@ -3953,8 +4321,8 @@ def plot_avg_waveforms(UnitA, UnitB, CV):
         # plt1.set_xlim(left = 0)
 
     avg_waveform_plot = FigureCanvasTkAgg(fig, master=root)
-    avg_waveform_plot.draw()
-    avg_waveform_plot = avg_waveform_plot.get_tk_widget()
+    avg_waveform_plot.draw_idle()
+    avg_waveform_plot = _dark_tk_canvas(avg_waveform_plot.get_tk_widget())
     avg_waveform_plot.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
 
 
@@ -4041,8 +4409,8 @@ def plot_trajectories(UnitA, UnitB, CV):
         plt2.set_ylabel(r"Y position ($\mu$m)")
 
     trajectory_plot = FigureCanvasTkAgg(fig, master=root)
-    trajectory_plot.draw()
-    trajectory_plot = trajectory_plot.get_tk_widget()
+    trajectory_plot.draw_idle()
+    trajectory_plot = _dark_tk_canvas(trajectory_plot.get_tk_widget())
     #    TrajectoryPlot.configure(bg = '#33393b')
     trajectory_plot.grid(
         row=3,
@@ -4285,6 +4653,69 @@ def _refresh_raw_displacement_overlay():
             raw_waveform_canvas.draw()
 
 
+raw_waveform_channel_pool = []
+raw_waveform_main_ax = None
+raw_waveform_scatter = None
+raw_waveform_figsize = None
+
+
+def _raw_waveform_surface(figsize):
+    """Return (fig, main_ax), building the figure/canvas only when necessary."""
+    global raw_waveform_plot, raw_waveform_figure, raw_waveform_canvas
+    global raw_waveform_channel_pool, raw_waveform_main_ax
+    global raw_waveform_scatter, raw_waveform_figsize, raw_displacement_axis
+
+    if (
+        raw_waveform_figure is not None
+        and raw_waveform_main_ax is not None
+        and raw_waveform_figsize == figsize
+        and _widget_exists(raw_waveform_plot)
+    ):
+        return raw_waveform_figure, raw_waveform_main_ax  # stage17_reuse
+
+    try:
+        if raw_waveform_plot is not None and raw_waveform_plot.winfo_exists() == 1:
+            raw_waveform_plot.destroy()
+    except Exception:
+        pass
+
+    raw_waveform_channel_pool = []
+    raw_displacement_axis = None
+    fig = Figure(figsize=figsize, dpi=100)
+    fig.set_tight_layout(False)
+    fig.patch.set_facecolor("#33393b")
+    main_ax = fig.add_axes(RAW_WAVEFORM_AXES_BOUNDS)
+    main_ax.set_facecolor("#2d2d2d")
+    main_ax.spines.right.set_visible(False)
+    main_ax.spines.top.set_visible(False)
+    main_ax.set_xlabel("X position ($\\mu$m)", size=_scaled_font_size(14))
+    main_ax.set_ylabel("Y position ($\\mu$m)", size=_scaled_font_size(14))
+    raw_waveform_scatter = main_ax.scatter([], [], c="grey", alpha=0.3)
+
+    raw_waveform_figure = fig
+    raw_waveform_main_ax = main_ax
+    raw_waveform_figsize = figsize
+    raw_waveform_canvas = FigureCanvasTkAgg(fig, master=root)
+    raw_waveform_plot = _dark_tk_canvas(raw_waveform_canvas.get_tk_widget())
+    raw_waveform_plot.grid(row=2, column=2, rowspan=4, padx=5, pady=5, sticky="nsew")
+    return fig, main_ax
+
+
+def _raw_channel_axis(fig, index, position):
+    """Reuse (or lazily create) the axis + two lines for one channel slot."""
+    pool = raw_waveform_channel_pool
+    while len(pool) <= index:
+        axis = fig.add_axes([0.0, 0.0, 0.01, 0.01])
+        axis.set_axis_off()
+        line_a, = axis.plot([], [], color=UNIT_A_COLOR)
+        line_b, = axis.plot([], [], color=UNIT_B_COLOR, lw=0.8)
+        pool.append((axis, line_a, line_b))
+    axis, line_a, line_b = pool[index]
+    axis.set_visible(True)
+    axis.set_position(position)
+    return axis, line_a, line_b
+
+
 def plot_raw_waveforms(unit_a, unit_b, CV):
 
     session_no_a = clus_info["session_id"][unit_a]
@@ -4307,19 +4738,11 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
         _add_raw_displacement_overlay(raw_waveform_figure, unit_a, unit_b)
         raw_waveform_canvas.draw_idle()
         return
-    if raw_waveform_plot.winfo_exists() == 1:
-        raw_waveform_plot.destroy()
-    raw_displacement_axis = None
+
     raw_waveform_pair_lines = []
     raw_waveform_view_key = view_key
 
-    fig = Figure(figsize=_scaled_figsize(4, 8), dpi=100)
-    raw_waveform_figure = fig
-    fig.set_tight_layout(False)
-    fig.patch.set_facecolor("#33393b")
-
-    main_ax = fig.add_axes(RAW_WAVEFORM_AXES_BOUNDS)
-    main_ax.set_facecolor("#2d2d2d")
+    fig, main_ax = _raw_waveform_surface(_scaled_figsize(4, 8))
     (
         main_ax_x_offset,
         main_ax_y_offset,
@@ -4331,19 +4754,12 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
         good_channels = nearest_channels(
             max_site, max_site_mean, channel_pos, clus_info, unit_a, CV
         )
-
-        # may want to change so it find this for both units and selects the most extreme arguments
-        # however i dont think tis will be necessary
         sub_min_y = np.nanmin(waveform[unit_a, :, good_channels].mean(axis=-1))
         sub_max_y = np.nanmax(waveform[unit_a, :, good_channels].mean(axis=-1))
-
     else:
         good_channels = nearest_channels(
             max_site, max_site_mean, channel_pos, clus_info, unit_a, CV[0]
         )
-
-        # may want to change so it find this for both units and selects the most extreme arguments
-        # however i dont think this will be necessary
         sub_min_y = np.nanmin(waveform[unit_a, :, good_channels, CV[0]])
         sub_max_y = np.nanmax(waveform[unit_a, :, good_channels, CV[0]])
 
@@ -4363,15 +4779,17 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
         else 0
     )
 
-    # make the main scatter positiose site as scatter with opacity
-    main_ax.scatter(
-        channel_pos[session_no_a][good_channels, 1],
-        channel_pos[session_no_a][good_channels, 2],
-        c="grey",
-        alpha=0.3,
+    raw_waveform_scatter.set_offsets(
+        np.column_stack(
+            (
+                channel_pos[session_no_a][good_channels, 1],
+                channel_pos[session_no_a][good_channels, 2],
+            )
+        )
     )
     main_ax.set_xlim(min_x - delta_x, max_x + delta_x)
     main_ax.set_ylim(min_y - delta_y, max_y + delta_y)
+    main_ax.set_xticks([min_x, max_x])
 
     for channel_index, good_channel in enumerate(good_channels):
         i, j = divmod(channel_index, 2)
@@ -4386,74 +4804,36 @@ def plot_raw_waveforms(unit_a, unit_b, CV):
             main_ax_y_offset,
             main_ax_y_offset + main_ax_y_scale - waveform_axis_height,
         )
-        # may need to change this positioning if units sizes are irregular
-        if j == 0:
-            # The peak in the waveform is not half way, so maths says the x axis should be starting at
-            # 0.1 and 0.6 so the middle is at 0.25/0.76 however chosen these values so it loks better by eye
-            ax = fig.add_axes(
-                [
-                    main_ax_x_offset + main_ax_x_scale * 0.25,
-                    waveform_axis_bottom,
-                    main_ax_x_scale * 0.25,
-                    waveform_axis_height,
-                ]
-            )
-        else:
-            ax = fig.add_axes(
-                [
-                    main_ax_x_offset + main_ax_x_scale * 0.75,
-                    waveform_axis_bottom,
-                    main_ax_x_scale * 0.25,
-                    waveform_axis_height,
-                ]
-            )
+        left = main_ax_x_offset + main_ax_x_scale * (0.25 if j == 0 else 0.75)
+        axis, line_a, line_b = _raw_channel_axis(
+            fig,
+            channel_index,
+            [left, waveform_axis_bottom, main_ax_x_scale * 0.25, waveform_axis_height],
+        )
 
         if CV == "Avg":
-            ax.plot(
-                waveform[unit_a, :, good_channel].mean(axis=-1).squeeze(),
-                color=UNIT_A_COLOR,
-            )
-            partner_line, = ax.plot(
-                waveform[unit_b, :, good_channel].mean(axis=-1).squeeze(),
-                color=UNIT_B_COLOR,
-                lw=0.8,
-            )
+            trace_a = waveform[unit_a, :, good_channel].mean(axis=-1).squeeze()
+            trace_b = waveform[unit_b, :, good_channel].mean(axis=-1).squeeze()
         else:
-            ax.plot(
-                waveform[unit_a, :, good_channel, CV[0]].squeeze(),
-                color=UNIT_A_COLOR,
-            )
-            partner_line, = ax.plot(
-                waveform[unit_b, :, good_channel, CV[1]].squeeze(),
-                color=UNIT_B_COLOR,
-                lw=0.8,
-            )
-        raw_waveform_pair_lines.append((good_channel, partner_line))
-        ax.set_ylim(sub_min_y, sub_max_y)
-        ax.set_axis_off()
+            trace_a = waveform[unit_a, :, good_channel, CV[0]].squeeze()
+            trace_b = waveform[unit_b, :, good_channel, CV[1]].squeeze()
 
+        samples = np.arange(np.asarray(trace_a).size)
+        line_a.set_data(samples, trace_a)
+        line_b.set_data(samples, trace_b)
+        raw_waveform_pair_lines.append((good_channel, line_b))
+        axis.set_xlim(0, max(samples.size - 1, 1))
+        axis.set_ylim(sub_min_y, sub_max_y)
+
+    for spare_axis, _, _ in raw_waveform_channel_pool[len(good_channels):]:
+        spare_axis.set_visible(False)
+
+    if raw_displacement_axis is not None:
+        raw_displacement_axis.remove()
+        raw_displacement_axis = None
     _add_raw_displacement_overlay(fig, unit_a, unit_b)
 
-    main_ax.spines.right.set_visible(False)
-    main_ax.spines.top.set_visible(False)
-    main_ax.set_xticks([min_x, max_x])
-    main_ax.set_xlabel(
-        "X position ($\mu$m)",
-        size=_scaled_font_size(14),
-    )
-    main_ax.set_ylabel(
-        "Y position ($\mu$m)",
-        size=_scaled_font_size(14),
-    )
-
-    raw_waveform_canvas = FigureCanvasTkAgg(fig, master=root)
-    raw_waveform_canvas.draw()
-    raw_waveform_plot = raw_waveform_canvas.get_tk_widget()
-    # RawWaveformPlot.configure(bg = '#33393b')
-
-    raw_waveform_plot.grid(
-        row=2, column=2, rowspan=4, padx=5, pady=5, sticky="nsew"
-    )
+    raw_waveform_canvas.draw_idle()  # stage17
 
 
 def _set_histogram_y_limits(axis, *histograms):
@@ -4572,8 +4952,8 @@ def plot_histograms(hist_names, hist, hist_matched, scores_to_include, unit_a, u
 
     canvas = FigureCanvasTkAgg(fig, master=root)
     histogram_panel = _HistogramPanel(canvas, markers, key)
-    canvas.draw()
-    hist_plot = canvas.get_tk_widget()
+    canvas.draw_idle()
+    hist_plot = _dark_tk_canvas(canvas.get_tk_widget())
 
     hist_plot.grid(
         row=2,
