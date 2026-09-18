@@ -90,12 +90,18 @@ class _UnitTable(ttk.Frame):
     def __init__(self, master, values):
         super().__init__(master)
         self._selected_unit = ""
+        self._sort_column = None
+        self._sort_descending = False
+        self._natural_order = []
         self.table = ttk.Treeview(
             self, columns=tuple(column for column, _, _ in self.columns),
             show="headings", selectmode="browse", height=5, style=self.table_style,
         )
         for column, title, width in self.columns:
-            self.table.heading(column, text=title)
+            self.table.heading(
+                column, text=title,
+                command=lambda name=column: self.sort_by(name),
+            )
             self.table.column(column, width=round(width * gui_scale), minwidth=40)
         scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=scrollbar.set)
@@ -140,6 +146,55 @@ class _UnitTable(ttk.Frame):
             self._selected_unit = selection[0]
             self.event_generate(self.selection_event)
 
+    def sort_by(self, column):
+        """Sort rows on a clicked heading, toggling direction on repeat clicks."""
+        if column == self._sort_column:
+            if self._sort_descending:
+                self._sort_column = None
+                self._sort_descending = False
+            else:
+                self._sort_descending = True
+        else:
+            self._sort_column = column
+            self._sort_descending = False
+        self._apply_sort()
+
+    @staticmethod
+    def _sort_key(value):
+        """Numeric order first, then text; pending or unavailable values give None."""
+        text = str(value).strip()
+        if text in ("", "...", "n/a", "error"):
+            return None
+        try:
+            return (0, float(text), "")
+        except ValueError:
+            return (1, 0.0, text.lower())
+
+    def _apply_sort(self):
+        rows = list(self.table.get_children())
+        if set(rows) != set(self._natural_order):
+            # Rows were rebuilt, so the current order is the unsorted one.
+            self._natural_order = rows
+        if self._sort_column is None:
+            rows = list(self._natural_order)
+        else:
+            ranked = [
+                (self._sort_key(self.table.set(row, self._sort_column)), row)
+                for row in self._natural_order
+            ]
+            available = [item for item in ranked if item[0] is not None]
+            available.sort(key=lambda item: item[0], reverse=self._sort_descending)
+            # Pending and unavailable values stay at the bottom in both directions.
+            missing = [row for key, row in ranked if key is None]
+            rows = [row for _, row in available] + missing
+        for index, row in enumerate(rows):
+            self.table.move(row, "", index)
+        for column, title, _ in self.columns:
+            indicator = ""
+            if column == self._sort_column:
+                indicator = " \u25bc" if self._sort_descending else " \u25b2"
+            self.table.heading(column, text=f"{title}{indicator}")
+
 
 class _DiagnosticUnitTable(_UnitTable):
     """Shared pair diagnostics, asynchronous calculation, and cancellation."""
@@ -182,6 +237,8 @@ class _DiagnosticUnitTable(_UnitTable):
             self._metric_after = self.after_idle(self.refresh_event_metrics)
         if self._metric_pairs:
             self._displacement_after = self.after_idle(self.refresh_displacement_metrics)
+        # Keep the chosen ordering when the table is rebuilt for a new pair.
+        self._apply_sort()
 
     def _cancel_displacement_metrics(self):
         self._displacement_cancel.set()
@@ -253,6 +310,8 @@ class _DiagnosticUnitTable(_UnitTable):
                     if self.table.set(row, "displacement") == "...":
                         self.table.set(row, "displacement", "error")
                         self._displacement_details[row] = f"Calculation failed: {error}"
+            if self._sort_column == "displacement":
+                self._apply_sort()
             self._displacement_future.result()
         else:
             self._displacement_after = self.after(50, self._poll_displacement_metrics)
@@ -342,6 +401,8 @@ class _DiagnosticUnitTable(_UnitTable):
                     "n/a" if correlation is None else f"{correlation:.3f}",
                 )
         if finished:
+            if self._sort_column == "event_r":
+                self._apply_sort()
             self._metric_future.result()
         else:
             self._metric_after = self.after(50, self._poll_event_metrics)
@@ -398,10 +459,12 @@ class UnitBTable(_DiagnosticUnitTable):
     )
     table_style = "UnitB.Treeview"
     selection_event = "<<UnitBSelected>>"
+    _option_order = ()
 
     def set_options(self, values):
         self._clear_diagnostics()
         unit_a = int(entry_a.get()) if values else None
+        self._option_order = [str(int(unit_b)) for unit_b in values]
         self.table.tag_configure("above_threshold", foreground=APPROVED_MATCH_COLOR)
         self.table.tag_configure("below_threshold", foreground=NO_ACCEPTED_ALTERNATIVE_COLOR)
         for unit_b in values:
@@ -420,7 +483,8 @@ class UnitBTable(_DiagnosticUnitTable):
         self._queue_event_metrics()
 
     def current(self, index):
-        self.set(self.table.get_children()[index])
+        # Indexes follow the probability-ordered option list, not the visual sort.
+        self.set(self._option_order[index])
 
 
 def create_unit_b_color_legend(master):
@@ -456,6 +520,10 @@ def open_diagnostic_help():
         "per pair, not once per CV direction.\n\n"
         "Unit A diagnostics refer to that row's listed Best B. Unit B diagnostics "
         "refer to the currently selected Unit A.\n\n"
+        "Click a column heading to sort the table by that column; click again for "
+        "descending order and a third time to restore the original order. Pending "
+        "and unavailable values stay at the bottom. Sorting is visual only: the "
+        "Up/Down keys still walk Unit B in probability order.\n\n"
         "Pair status: accepted, a better-or-tied accepted alternative exists, or no "
         "better accepted alternative exists. Unit B colors indicate automatic "
         "OR/AND threshold eligibility, not final acceptance.\n\n"
