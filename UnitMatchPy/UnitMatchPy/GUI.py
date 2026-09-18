@@ -477,11 +477,36 @@ def open_diagnostic_help():
         "manual decisions.\n\n"
         "Decisions are preserved in memory on reopening, not automatically saved "
         "to disk. Accepting a new partner replaces competitors within that "
-        "session pair, not links to other sessions."
+        "session pair, not links to other sessions.\n\n"
+        "CURATION GUIDANCE\n\n"
+        "Green rows (accepted pairs): read Disp. consistency (0-100) and Event r "
+        "(0-1) together, and re-inspect the pair whenever either one is low. A low "
+        "Event r is not proof of a wrong match: it also happens when neither unit "
+        "is tuned to any of the available alignments.\n\n"
+        "Also check Dist (um). A pair sitting well above the average displacement "
+        "of the accepted matches, as shown by the arrows on the displacement map, "
+        "should be discarded.\n\n"
+        "A PBS-to-PBS stitching run is the best reference for what a genuine same "
+        "unit looks like: use it to calibrate your eye on the autocorrelograms, "
+        "the waveform shape and the score distributions. The Event Viewer helps "
+        "here as well, because tuning is expected to stay fairly stable.\n\n"
+        "Purple rows: the pair clears every threshold, but a better-or-tied "
+        "accepted alternative exists. Swap the units, inspect that top-ranked pair "
+        "and confirm it really is the better one. Do this especially when the "
+        "purple pair looks promising.\n\n"
+        "Red rows: a red Unit A row has no better accepted alternative, and a red "
+        "Unit B row is below the automatic threshold. Check them anyway, since a "
+        "pair can still be a real match without crossing the threshold."
     )
-    ttk.Label(
-        diagnostic_help_window, text=text, wraplength=600, justify="left", padding=16,
-    ).pack(fill="both", expand=True)
+    text_frame = ttk.Frame(diagnostic_help_window, padding=16)
+    text_frame.pack(fill="both", expand=True)
+    help_text = Text(text_frame, wrap="word", width=72, height=28, borderwidth=0)
+    scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=help_text.yview)
+    help_text.configure(yscrollcommand=scrollbar.set)
+    help_text.insert("1.0", text)
+    help_text.configure(state="disabled")
+    help_text.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
     ttk.Button(
         diagnostic_help_window, text="Close", command=diagnostic_help_window.destroy,
     ).pack(pady=(0, 12))
