@@ -1355,3 +1355,107 @@ def test_swap_units_keeps_the_swapped_pair_selected(
     assert any(row.startswith("242 ") for row in gui.entry_a.values)
     assert gui.option_a[gui.match_idx] == expected_pair
     assert updates == [None]
+
+
+def test_swap_units_keeps_the_pair_when_the_displacement_filter_is_on(monkeypatch):
+    """The filtered rebuild must follow the reversed pair, not fall back to row 0."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        n = 256
+        unit_a, unit_b = 89, 342
+        rng = np.random.default_rng(0)
+        cv = [rng.random((2 * n, 2 * n)), rng.random((2 * n, 2 * n))]
+
+        class Var:
+            def __init__(self, value):
+                self._value = value
+
+            def get(self):
+                return self._value
+
+            def set(self, value):
+                self._value = value
+
+        class Label:
+            def configure(self, **kwargs):
+                pass
+
+        for name, value in {
+            "root": root,
+            "gui_scale": 1.0,
+            "session_switch": np.array([0, n, 2 * n]),
+            "clus_info": {
+                "session_id": np.array([0] * n + [1] * n),
+                "original_ids": np.arange(2 * n),
+                "probe_numbers": np.zeros(2 * n, dtype=int),
+            },
+            "output_GUI": cv,
+            "output_avg": (cv[0] + cv[1]) / 2,
+            "automatic_candidate_pairs": set(),
+            "automatic_match_pairs": set(),
+            "is_match": [],
+            "not_match": [],
+            "match_threshold": 0.5,
+            "review_matches": np.array(
+                [[unit_a, unit_b], [unit_a, 213], [150, 300],
+                 [unit_b, unit_a], [213, unit_a], [300, 150]]
+            ),
+            # The swapped pair is deliberately filtered out.
+            "consistency_filter_pairs": {(150, 300), (300, 150), (213, unit_a)},
+            "toggle_unusual_displacement_val": Var(True),
+            "consistency_threshold_var": Var("95"),
+            "unusual_displacement_status_label": Label(),
+            "session_entry_a": Var(1),
+            "session_entry_b": Var(2),
+            "match_idx": 0,
+        }.items():
+            monkeypatch.setattr(gui, name, value, raising=False)
+
+        for name in ("_set_pair_controls", "_refresh_session_summary",
+                     "_cancel_consistency_filter", "color_unit_a_options"):
+            monkeypatch.setattr(gui, name, lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(gui, "_unusual_filter_status", lambda *a: "", raising=False)
+        monkeypatch.setattr(
+            gui._DiagnosticUnitTable, "_set_pair_metrics", lambda self, *a, **k: None
+        )
+        monkeypatch.setattr(
+            gui._DiagnosticUnitTable, "_queue_event_metrics", lambda self: None
+        )
+        monkeypatch.setattr(
+            gui._DiagnosticUnitTable, "_clear_diagnostics", lambda self: self._clear_options()
+        )
+        updates = []
+        monkeypatch.setattr(gui, "update", updates.append, raising=False)
+
+        frame = ttk.Frame(root)
+        monkeypatch.setattr(gui, "entry_frame", frame, raising=False)
+        monkeypatch.setattr(
+            gui, "option_a",
+            gui.get_ranked_unit_a_options(1, 2, unusual_only=False),
+            raising=False,
+        )
+        table_a = gui.UnitATable(frame, values=gui.get_unit_a_display_options())
+        monkeypatch.setattr(gui, "entry_a", table_a, raising=False)
+        table_a.set(unit_a)
+        monkeypatch.setattr(
+            gui, "option_b", gui.get_ranked_unit_b_options(unit_a, 2), raising=False
+        )
+        monkeypatch.setattr(
+            gui, "entry_b", gui.UnitBTable(frame, values=gui.option_b), raising=False
+        )
+        gui.select_unit_b(unit_b)
+
+        gui.swap_units()
+        root.update()
+
+        assert int(gui.entry_a.get()) == unit_b
+        assert int(gui.entry_b.get()) == unit_a
+        assert gui.option_a[gui.match_idx] == [unit_b, unit_a]
+        assert updates == [None]
+    finally:
+        root.destroy()
+        gui._pending_preferred_pair = None

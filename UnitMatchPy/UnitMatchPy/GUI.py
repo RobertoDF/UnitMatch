@@ -2769,6 +2769,9 @@ def _set_pair_controls(enabled):
             button.configure(state="normal" if enabled else "disabled")
 
 
+_pending_preferred_pair = None
+
+
 def update_unusual_displacement_filter():
     """Fit/filter in the worker; never block Tk on robust covariance fitting."""
     global consistency_filter_cancel, consistency_filter_future, consistency_filter_after
@@ -2831,18 +2834,33 @@ def _apply_displacement_filter():
     global match_idx
     global option_a
     global option_b
+    global _pending_preferred_pair
 
     session_a = int(session_entry_a.get())
     session_b = int(session_entry_b.get())
     unusual_only = _unusual_filter_enabled()
-    previous_a = entry_a.get().split()[0] if entry_a.get() else None
-    previous_b = entry_b.get() if entry_b.get() else None
+    requested_pair = _pending_preferred_pair
+    _pending_preferred_pair = None
+    if requested_pair is not None:
+        # A swap asked for a specific reversed pair; the live tables still hold
+        # the pre-swap units, so prefer the requested one over them.
+        previous_a = str(requested_pair[0])
+        previous_b = str(requested_pair[1])
+    else:
+        previous_a = entry_a.get().split()[0] if entry_a.get() else None
+        previous_b = entry_b.get() if entry_b.get() else None
 
     option_a = get_ranked_unit_a_options(
         session_a,
         session_b,
         unusual_only=unusual_only,
     )
+    if requested_pair is not None and all(
+        unit != requested_pair[0] for unit, _ in option_a
+    ):
+        # Keep an explicitly requested pair reachable even when the filter or
+        # the review threshold would otherwise drop its Unit A.
+        option_a = option_a + [list(requested_pair)]
     entry_a.set_options(get_unit_a_display_options())
     _set_pair_controls(bool(option_a))
     if not option_a:
@@ -3179,12 +3197,22 @@ def swap_units():
     global match_idx
     global option_a
     global option_b
+    global _pending_preferred_pair
 
     if _unusual_filter_enabled():
         session_a_tmp = int(session_entry_a.get())
         session_b_tmp = int(session_entry_b.get())
+        selected_a = entry_a.get()
+        selected_b = entry_b.get()
         session_entry_a.set(session_b_tmp)
         session_entry_b.set(session_a_tmp)
+        if selected_a and selected_b:
+            # Carry the reversed pair through the rebuild; the filtered option
+            # list is keyed on the new Unit A session, so the old Unit A is no
+            # longer a valid choice and would silently fall back to the first row.
+            _pending_preferred_pair = (
+                int(selected_b), int(selected_a.split()[0]),
+            )
         update_unusual_displacement_filter()
         return
 
