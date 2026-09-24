@@ -407,3 +407,39 @@ def test_apply_rejects_multiple_analyzers():
 
     with pytest.raises(RuntimeError, match="same single analyzer"):
         merger.apply_merges()
+
+
+def test_display_review_reports_each_pair_to_the_external_view():
+    """A floating PSTH window has to follow the navigator, not just the first pair."""
+    pytest.importorskip("ipywidgets")
+    merger = SpikeInterfaceSessionMerger(_Analyzer())
+    merger.merge_groups = [[10, 11], [12, 13]]
+    merger.decisions = {(10, 11): None, (12, 13): None}
+    merger.output_prob_matrix = np.full((4, 4), 0.9)
+    merger.unit_ids = np.array([10, 11, 12, 13])
+
+    seen = []
+    review = merger.display_review(
+        show_diagnostics=False, on_pair_change=seen.append
+    )
+
+    assert seen == [[10, 11]]
+    review.children[1].value = 2
+    assert seen == [[10, 11], [12, 13]]
+
+
+def test_display_review_survives_a_failing_external_view(capsys):
+    """Losing the side window must not strand the reviewer on one pair."""
+    pytest.importorskip("ipywidgets")
+    merger = SpikeInterfaceSessionMerger(_Analyzer())
+    merger.merge_groups = [[10, 11]]
+    merger.decisions = {(10, 11): None}
+    merger.output_prob_matrix = np.full((2, 2), 0.9)
+    merger.unit_ids = np.array([10, 11])
+
+    def explode(_group):
+        raise RuntimeError("window closed")
+
+    merger.display_review(show_diagnostics=False, on_pair_change=explode)
+
+    assert "window closed" in capsys.readouterr().out

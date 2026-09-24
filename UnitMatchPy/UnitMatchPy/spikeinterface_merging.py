@@ -563,8 +563,13 @@ class SpikeInterfaceSessionMerger:
         figure._unitmatch_reset_waveforms = reset_waveforms
         return figure
 
-    def display_review(self, show_diagnostics=True):
-        """Display candidate diagnostics and Approve/Reject controls."""
+    def display_review(self, show_diagnostics=True, on_pair_change=None):
+        """Display candidate diagnostics and Approve/Reject controls.
+
+        ``on_pair_change`` is called with the displayed group whenever the
+        selection moves, so callers can drive an external view such as a
+        floating PSTH window alongside the inline diagnostics.
+        """
         try:
             import ipywidgets as widgets
             from IPython.display import display
@@ -644,6 +649,14 @@ class SpikeInterfaceSessionMerger:
                     with plt.ioff():
                         active_figure = self._make_group_figure(group)
                     display(active_figure)
+
+            if on_pair_change is not None:
+                try:
+                    on_pair_change(group)
+                except Exception as error:
+                    # A failing side view must not strand the reviewer on a
+                    # pair they can no longer navigate away from.
+                    print(f"Could not update the external pair view: {error!r}")
 
         def record(approved):
             self._set_decision(tuple(current_group()), approved)

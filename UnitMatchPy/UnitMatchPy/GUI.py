@@ -1051,6 +1051,11 @@ def _compute_event_psth(
     return bin_centers, firing_rate_hz, event_times.size
 
 
+# Public alias so notebooks can bin PSTHs exactly the way the Event Viewer does
+# instead of maintaining a second, drifting implementation.
+compute_event_psth = _compute_event_psth
+
+
 def _widget_exists(widget):
     try:
         return bool(widget.winfo_exists())
