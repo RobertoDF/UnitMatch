@@ -553,7 +553,9 @@ def open_diagnostic_help():
         "is tuned to any of the available alignments.\n\n"
         "Also check Dist (um). A pair sitting well above the average displacement "
         "of the accepted matches, as shown by the arrows on the displacement map, "
-        "should be discarded.\n\n"
+        "should be discarded. Green rows always contain a few implausible values, "
+        "hundreds of micrometers up to more than 1000 um; those are not real "
+        "same-unit distances and should be rejected on sight.\n\n"
         "A PBS-to-PBS stitching run is the best reference for what a genuine same "
         "unit looks like: use it to calibrate your eye on the autocorrelograms, "
         "the waveform shape and the score distributions. The Event Viewer helps "
@@ -2104,6 +2106,20 @@ def get_ranked_unit_b_options(unit_a, session_b):
     return options
 
 
+def _match_index_for_pair(unit_a, unit_b, fallback=0):
+    """Locate a pair in option_a, tolerating a Unit A ranked with another partner.
+
+    Swapping a pair puts the former Unit B on the left, but option_a keeps only
+    that unit's own best-ranked partner, so the swapped pair is often absent.
+    """
+    if [unit_a, unit_b] in option_a:
+        return option_a.index([unit_a, unit_b])
+    for index, (candidate_a, _) in enumerate(option_a):
+        if candidate_a == unit_a:
+            return index
+    return fallback
+
+
 def get_unit_a_display_options():
     display_options = []
     for unit_a, unit_b in option_a:
@@ -3189,6 +3205,10 @@ def swap_units():
     session_entry_b.set(session_a_tmp)
 
     option_a = get_ranked_unit_a_options(session_b_tmp, session_a_tmp)
+    if all(unit != entry_b_tmp for unit, _ in option_a):
+        # The former Unit B can sit below the review threshold in this
+        # direction; keep it listed so the swapped pair stays selectable.
+        option_a = option_a + [[entry_b_tmp, entry_a_tmp]]
     entry_a = UnitATable(
         entry_frame, values=get_unit_a_display_options()
     )
@@ -3205,9 +3225,7 @@ def swap_units():
     entry_a.grid(row=2, column=1, columnspan=2, stick="WE", padx=5)
     entry_b.grid(row=2, column=3, columnspan=2, sticky="WE", padx=5)
 
-    tmp_list = [int(entry_b_tmp), int(entry_a_tmp)]
-
-    match_idx = option_a.index(tmp_list)
+    match_idx = _match_index_for_pair(int(entry_b_tmp), int(entry_a_tmp), match_idx)
     update(None)
 
 

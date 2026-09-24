@@ -1249,3 +1249,109 @@ def test_manual_decisions_refresh_displacement_overlay(monkeypatch):
     gui.set_not_match()
 
     assert redraws == [True, True]
+
+
+def _swap_units_harness(monkeypatch, ranked_after_swap):
+    """Drive swap_units() with stubbed widgets and return the resulting state."""
+
+    class FakeEntry:
+        def __init__(self, master=None, values=None):
+            self.values = list(values or [])
+            self._value = ""
+
+        def set(self, value):
+            self._value = str(value)
+
+        def get(self):
+            return self._value
+
+        def bind(self, *args, **kwargs):
+            pass
+
+        def grid(self, *args, **kwargs):
+            pass
+
+        def destroy(self):
+            pass
+
+        def winfo_exists(self):
+            return 1
+
+    class FakeSession:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value):
+            self._value = value
+
+    entry_a = FakeEntry()
+    entry_a.set(100)
+    entry_b = FakeEntry()
+    entry_b.set(242)
+    updates = []
+
+    monkeypatch.setattr(gui, "entry_frame", None, raising=False)
+    monkeypatch.setattr(gui, "entry_a", entry_a, raising=False)
+    monkeypatch.setattr(gui, "entry_b", entry_b, raising=False)
+    monkeypatch.setattr(gui, "session_entry_a", FakeSession(1), raising=False)
+    monkeypatch.setattr(gui, "session_entry_b", FakeSession(2), raising=False)
+    monkeypatch.setattr(gui, "option_a", [[100, 242]], raising=False)
+    monkeypatch.setattr(gui, "option_b", [242, 243], raising=False)
+    monkeypatch.setattr(gui, "match_idx", 7, raising=False)
+    monkeypatch.setattr(
+        gui, "toggle_unusual_displacement_val", None, raising=False
+    )
+    monkeypatch.setattr(gui, "UnitATable", FakeEntry, raising=False)
+    monkeypatch.setattr(gui, "UnitBTable", FakeEntry, raising=False)
+    monkeypatch.setattr(
+        gui,
+        "get_ranked_unit_a_options",
+        lambda *args, **kwargs: [list(pair) for pair in ranked_after_swap],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gui,
+        "get_unit_a_display_options",
+        lambda: [f"{a} (1) {b}" for a, b in gui.option_a],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gui, "get_ranked_unit_b_options", lambda *args: [100, 101], raising=False
+    )
+    monkeypatch.setattr(
+        gui, "select_unit_b", lambda unit: gui.entry_b.set(unit), raising=False
+    )
+    monkeypatch.setattr(
+        gui, "enable_unit_a_review_colors", lambda: None, raising=False
+    )
+    monkeypatch.setattr(gui, "bind_unit_b_navigation", lambda: None, raising=False)
+    monkeypatch.setattr(gui, "update", updates.append, raising=False)
+
+    gui.swap_units()
+    return updates
+
+
+@pytest.mark.parametrize(
+    "ranked_after_swap, expected_pair",
+    [
+        # Unit A is ranked against its own best partner, not the swapped one.
+        ([[300, 100], [242, 150]], [242, 150]),
+        # Unit A scores below the review threshold in the reversed direction.
+        ([[300, 100], [301, 102]], [242, 100]),
+        # The swapped pair is ranked exactly as-is.
+        ([[242, 100], [300, 101]], [242, 100]),
+    ],
+)
+def test_swap_units_keeps_the_swapped_pair_selected(
+    monkeypatch, ranked_after_swap, expected_pair
+):
+    updates = _swap_units_harness(monkeypatch, ranked_after_swap)
+
+    assert gui.entry_a.get() == "242"
+    assert gui.entry_b.get() == "100"
+    assert any(row.startswith("242 ") for row in gui.entry_a.values)
+    assert gui.option_a[gui.match_idx] == expected_pair
+    assert updates == [None]
