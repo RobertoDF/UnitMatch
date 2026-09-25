@@ -4809,10 +4809,14 @@ def _raw_waveform_surface(figsize):
     global raw_waveform_channel_pool, raw_waveform_main_ax
     global raw_waveform_scatter, raw_waveform_figsize, raw_displacement_axis
 
+    # Relaunching creates a new root with a fresh placeholder raw_waveform_plot,
+    # so only reuse a figure whose own canvas widget is the live, current one.
     if (
         raw_waveform_figure is not None
         and raw_waveform_main_ax is not None
         and raw_waveform_figsize == figsize
+        and raw_waveform_canvas is not None
+        and raw_waveform_canvas.get_tk_widget() is raw_waveform_plot
         and _widget_exists(raw_waveform_plot)
     ):
         return raw_waveform_figure, raw_waveform_main_ax  # stage17_reuse

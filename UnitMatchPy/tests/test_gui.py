@@ -963,6 +963,53 @@ def test_histogram_legend_has_visible_matching_line_handles(monkeypatch):
     assert handles[-1].get_linestyle() == "--"
 
 
+def test_raw_waveform_surface_is_rebuilt_after_a_relaunch(monkeypatch):
+    class Widget:
+        @staticmethod
+        def winfo_exists():
+            return 1
+
+        @staticmethod
+        def grid(**kwargs):
+            pass
+
+        @staticmethod
+        def configure(**kwargs):
+            pass
+
+        @staticmethod
+        def destroy():
+            pass
+
+    class Canvas:
+        def __init__(self, figure, master):
+            self.widget = Widget()
+
+        def get_tk_widget(self):
+            return self.widget
+
+    monkeypatch.setattr(gui, "FigureCanvasTkAgg", Canvas)
+    monkeypatch.setattr(gui, "root", object(), raising=False)
+    for name in (
+        "raw_waveform_figure", "raw_waveform_canvas", "raw_waveform_main_ax",
+        "raw_waveform_scatter", "raw_displacement_axis",
+    ):
+        monkeypatch.setattr(gui, name, None, raising=False)
+    monkeypatch.setattr(gui, "raw_waveform_channel_pool", [], raising=False)
+    monkeypatch.setattr(gui, "raw_waveform_figsize", None, raising=False)
+    monkeypatch.setattr(gui, "raw_waveform_plot", Widget(), raising=False)
+
+    first_figure, _ = gui._raw_waveform_surface((4, 8))
+    assert gui._raw_waveform_surface((4, 8))[0] is first_figure
+
+    # run_GUI on a new root replaces the plot with a placeholder that still exists.
+    monkeypatch.setattr(gui, "raw_waveform_plot", Widget(), raising=False)
+    rebuilt_figure, _ = gui._raw_waveform_surface((4, 8))
+
+    assert rebuilt_figure is not first_figure
+    assert gui.raw_waveform_canvas.get_tk_widget() is gui.raw_waveform_plot
+
+
 @pytest.mark.parametrize(
     ("channel_count", "waveform_values"),
     [
